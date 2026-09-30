@@ -1402,7 +1402,9 @@ app.get('/api/device/manifest', deviceAuthMiddleware, (req: any, res: Response) 
         durationSeconds: i.durationSeconds || config.intervalSeconds || 10,
         sha256: asset.sha256,
         fileSize: asset.fileSize,
-        downloadUrl: asset.url ? originalImageKitUrl(asset.url) : `/api/device/media/${asset.id}`
+        // Keep devices on the application origin. The backend proxies ImageKit's
+        // original bytes and validates them before Android applies the playlist.
+        downloadUrl: `/api/device/media/${asset.id}`
       };
     })
     .filter(Boolean);
@@ -1416,15 +1418,35 @@ app.get('/api/device/manifest', deviceAuthMiddleware, (req: any, res: Response) 
   });
 });
 
-app.get('/api/device/media/:assetId', (req: Request, res: Response) => {
+app.get('/api/device/media/:assetId', async (req: Request, res: Response) => {
   const asset = db.mediaAssets.find(a => a.id === req.params.assetId);
   if (!asset) {
     return res.status(404).json({ error: 'Asset not found' });
   }
 
   if (asset.url?.startsWith('https://')) {
-    res.redirect(302, originalImageKitUrl(asset.url));
-    return;
+    try {
+      const upstream = await fetch(originalImageKitUrl(asset.url));
+      if (!upstream.ok) {
+        return res.status(502).json({ error: `Media storage returned HTTP ${upstream.status}` });
+      }
+
+      const fileBuffer = Buffer.from(await upstream.arrayBuffer());
+      const downloadedHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+      if (downloadedHash !== asset.sha256) {
+        console.error(`[Media] Checksum mismatch for ${asset.id}: expected ${asset.sha256}, got ${downloadedHash}`);
+        return res.status(502).json({ error: 'Stored media checksum mismatch. Re-upload this asset.' });
+      }
+
+      res.setHeader('Content-Type', asset.mimeType || upstream.headers.get('content-type') || 'application/octet-stream');
+      res.setHeader('Content-Length', fileBuffer.length);
+      res.setHeader('X-Asset-SHA256', asset.sha256);
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      return res.send(fileBuffer);
+    } catch (error) {
+      console.error(`[Media] Failed to proxy ${asset.id} from ImageKit`, error);
+      return res.status(502).json({ error: 'Unable to retrieve media from storage' });
+    }
   }
 
   const filePath = path.join(MEDIA_DIR, asset.storageKey);
