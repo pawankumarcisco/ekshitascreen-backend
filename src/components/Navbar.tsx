@@ -1,5 +1,5 @@
 import React from 'react';
-import { Plus, Shield, LogOut } from 'lucide-react';
+import { Plus, LogOut } from 'lucide-react';
 import { DashboardUser } from '../types';
 
 interface NavbarProps {
@@ -36,14 +36,6 @@ export const Navbar: React.FC<NavbarProps> = ({
             />
           </button>
 
-          <div className="hidden sm:flex items-center gap-2 ml-4 pl-4 border-l border-slate-200 text-xs text-slate-500">
-            <span className="flex items-center gap-1.5 font-medium text-slate-700">
-              <span className={`w-2 h-2 rounded-full ${isServerOnline ? 'bg-emerald-500' : 'bg-red-500'}`} />
-              LAN Server
-            </span>
-            <span aria-hidden="true">·</span>
-            <span className="font-mono text-slate-600">Port 3000</span>
-          </div>
         </div>
 
         {/* Zone 2: Navigation Links */}
@@ -99,8 +91,7 @@ export const Navbar: React.FC<NavbarProps> = ({
         {/* Zone 3: Actions & Profile */}
         <div className="flex items-center gap-3">
           <div className="hidden lg:flex items-center gap-1.5 text-xs text-slate-500 mr-1 bg-slate-50 border border-slate-200 px-2 py-1 rounded-md">
-            <Shield className="w-3.5 h-3.5 text-slate-400" />
-            <span className="font-medium text-slate-700">{user.name} · {user.role}</span>
+            <span className="font-medium text-slate-700">{user.name}</span>
           </div>
 
           {user.role === 'ADMIN' && <button

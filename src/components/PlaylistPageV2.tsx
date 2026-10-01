@@ -21,7 +21,7 @@ export function PlaylistPageV2({ assets, onMediaChanged }: { assets: MediaAsset[
 
   const choose = (playlist: ContentPlaylist) => {
     setSelected({ ...playlist });
-    setItems(playlist.items.map(item => ({ ...item })));
+    setItems((playlist.items || []).map(item => ({ ...item })));
   };
   const move = (index: number, delta: number) => setItems(current => {
     const next = [...current], destination = index + delta;
