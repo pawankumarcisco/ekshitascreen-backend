@@ -822,7 +822,7 @@ app.post('/api/screens/register', authMiddleware, adminMiddleware, (req: any, re
   });
 });
 
-const PUBLISH_STATES = ['QUEUED', 'DOWNLOADING', 'VERIFYING', 'READY', 'PLAYING', 'FAILED', 'SUPERSEDED'];
+const PUBLISH_STATES = ['QUEUED', 'HELD', 'DOWNLOADING', 'VERIFYING', 'READY', 'PLAYING', 'FAILED', 'SUPERSEDED', 'CANCELLED'];
 const STATE_RANK: Record<string, number> = { QUEUED: 0, DOWNLOADING: 1, VERIFYING: 2, READY: 3, PLAYING: 4 };
 const MAX_CANVAS = 7680;
 const DEFAULT_PLAYBACK_SETTINGS: Record<string, any> = {
@@ -864,6 +864,34 @@ function startAttempt(target: any, automatic = false) {
   target.errorCode = null; target.errorMessage = null; target.lastProgressAt = attempt.createdAt;
   db.publishAttempts.push(attempt);
   return attempt;
+}
+
+function holdPendingPublications(screen: any) {
+  if (!isScreenSuspended(screen)) return false;
+  let changed = false;
+  for (const target of db.publishTargets.filter(t => t.screenId === screen.id && !['PLAYING', 'FAILED', 'SUPERSEDED', 'CANCELLED', 'HELD'].includes(t.status))) {
+    target.heldFromStatus = target.status;
+    target.status = 'HELD';
+    target.heldAt = new Date().toISOString();
+    target.errorCode = 'SCREEN_EXPIRED';
+    target.errorMessage = 'Screen registration expired; update is on hold until renewal.';
+    const attempt = db.publishAttempts.find(a => a.id === target.attemptId);
+    if (attempt) attempt.status = 'HELD';
+    changed = true;
+  }
+  return changed;
+}
+
+function purgeScreenPublications(screenId: string) {
+  const targetIds = new Set(db.publishTargets.filter(t => t.screenId === screenId).map(t => t.id));
+  const attemptIds = new Set(db.publishAttempts.filter(a => targetIds.has(a.targetId)).map(a => a.id));
+  db.publishEvents = db.publishEvents.filter(e => !attemptIds.has(e.attemptId));
+  db.publishAttempts = db.publishAttempts.filter(a => !targetIds.has(a.targetId));
+  db.publishTargets = db.publishTargets.filter(t => t.screenId !== screenId);
+
+  const emptyJobIds = new Set(db.publishJobs.filter(j => !db.publishTargets.some(t => t.jobId === j.id)).map(j => j.id));
+  db.publishJobs = db.publishJobs.filter(j => !emptyJobIds.has(j.id));
+  for (const job of db.publishJobs) job.targetCount = db.publishTargets.filter(t => t.jobId === job.id).length;
 }
 
 function owns(user: any, value: any) { return user.role === 'ADMIN' || value.ownerId === user.id || value.userId === user.id; }
@@ -962,7 +990,7 @@ function validateGeneralSettings(values:any, user:any){
   if(!['CONTAIN','COVER','STRETCH'].includes(merged.imageFit))return 'Invalid image fit';
   if(!/^#[0-9A-Fa-f]{6}$/.test(merged.backgroundColor))return 'Background colour must use #RRGGBB';
   if(!Number.isInteger(merged.defaultSlideDurationSeconds)||merged.defaultSlideDurationSeconds<1||merged.defaultSlideDurationSeconds>3600)return 'Slide duration must be 1–3600 seconds';
-  if(!['NONE','FADE','SLIDE'].includes(merged.transition))return 'Invalid transition';
+  if(!['NONE','FADE','SLIDE','SLIDE_LEFT','SLIDE_RIGHT','SLIDE_UP','SLIDE_DOWN','ZOOM_IN','ZOOM_OUT','FADE_ZOOM'].includes(merged.transition))return 'Invalid transition';
   if(!Number.isInteger(merged.transitionDurationMs)||merged.transitionDurationMs<0||merged.transitionDurationMs>5000)return 'Transition duration must be 0–5000 milliseconds';
   if(merged.transitionDurationMs>=merged.defaultSlideDurationSeconds*1000)return 'Transition duration must be shorter than slide duration';
   if(!['PLAYLIST_ORDER','SHUFFLE'].includes(merged.playbackOrder))return 'Invalid playback order';
@@ -1122,16 +1150,28 @@ app.post('/api/publications', authMiddleware, (req: any, res: Response) => {
     const globalSettings=db.playbackSettings.find(s=>s.scope==='GLOBAL')?.values||{}, groupSettings=screen.settingsGroupId?db.playbackSettings.find(s=>s.scope==='GROUP'&&s.scopeId===screen.settingsGroupId)?.values||{}:{}, screenSettings=db.playbackSettings.find(s=>s.scope==='SCREEN'&&s.scopeId===screen.id)?.values||{};
     const effectiveSettings={...DEFAULT_PLAYBACK_SETTINGS,...globalSettings,...groupSettings,...screenSettings,...Object.fromEntries(Object.entries(draft).filter(([k,v])=>['loop','shuffle'].includes(k)&&v!==null&&v!==undefined))};
     const scheduleBundle=db.schedules.filter(s=>!s.deletedAt&&s.enabled!==false&&s.targetScreenIds?.includes(screenId)).map(s=>({...s,playlist:db.playlists.find(p=>p.id===s.playlistId),items:db.playlistItems.filter(i=>i.playlistId===s.playlistId).map(i=>({...i,mediaAsset:db.mediaAssets.find(a=>a.id===i.mediaAssetId)})),layout:db.layouts.find(l=>l.id===s.layoutId)}));
-    const target: any = { id: 'target-' + crypto.randomUUID(), jobId: job.id, screenId, screenNameSnapshot: screen.name, deviceId: screen.deviceId, targetVersion: version, playlistVersion: draft.version, configurationVersion: config?.version || 1, configurationSnapshot: config ? { ...config } : null, layoutSnapshot:selectedLayout?{...selectedLayout}:null,settingsSnapshot:effectiveSettings,scheduleSnapshot:scheduleBundle, manifestSnapshot: assets, status: 'QUEUED', totalBytes: assets.reduce((n: number, a: any) => n + a.fileSize, 0), totalFiles: assets.length, bytesDownloaded: 0, filesCompleted: 0, progressPercent: 0, activeVersion: null, previousActiveVersion: db.heartbeats.find(h => h.deviceId === screen.deviceId)?.appliedVersion || 0, lastProgressAt: now, errorCode: null, errorMessage: null, createdAt: now };
-    db.publishTargets.push(target); startAttempt(target);
-    notifyDevice(screen.deviceId, 'CONTENT_UPDATE_AVAILABLE', { publishJobId: job.id, targetId: target.id, attemptId: target.attemptId, manifestVersion: version });
+    const suspended = isScreenSuspended(screen);
+    const target: any = { id: 'target-' + crypto.randomUUID(), jobId: job.id, screenId, screenNameSnapshot: screen.name, deviceId: screen.deviceId, targetVersion: version, playlistVersion: draft.version, configurationVersion: config?.version || 1, configurationSnapshot: config ? { ...config } : null, layoutSnapshot:selectedLayout?{...selectedLayout}:null,settingsSnapshot:effectiveSettings,scheduleSnapshot:scheduleBundle, manifestSnapshot: assets, status: suspended ? 'HELD' : 'QUEUED', totalBytes: assets.reduce((n: number, a: any) => n + a.fileSize, 0), totalFiles: assets.length, bytesDownloaded: 0, filesCompleted: 0, progressPercent: 0, activeVersion: null, previousActiveVersion: db.heartbeats.find(h => h.deviceId === screen.deviceId)?.appliedVersion || 0, lastProgressAt: now, errorCode: suspended ? 'SCREEN_EXPIRED' : null, errorMessage: suspended ? 'Screen registration expired; update is on hold until renewal.' : null, heldAt: suspended ? now : null, createdAt: now };
+    db.publishTargets.push(target);
+    if (!suspended) {
+      startAttempt(target);
+      notifyDevice(screen.deviceId, 'CONTENT_UPDATE_AVAILABLE', { publishJobId: job.id, targetId: target.id, attemptId: target.attemptId, manifestVersion: version });
+    }
   }
   saveDB(db); logAudit(req.user.id, null, 'PUBLICATION_CREATED', { jobId: job.id, resolvedScreenIds: [...ids], groupSnapshots: job.groupSnapshots });
   broadcastEvent('PUBLICATION_UPDATED', { jobId: job.id });
   res.status(201).json(enrichJob(job));
 });
 
-app.get('/api/publications', authMiddleware, (req: any, res: Response) => res.json(db.publishJobs.filter(j => req.user.role === 'ADMIN' || j.ownerId === req.user.id).sort((a,b) => b.createdAt.localeCompare(a.createdAt)).map(enrichJob)));
+app.get('/api/publications', authMiddleware, (req: any, res: Response) => {
+  let heldAny = false;
+  for (const screen of db.screens) heldAny = holdPendingPublications(screen) || heldAny;
+  const registeredScreenIds = new Set(db.screens.map(s => s.id));
+  const orphanedScreenIds = [...new Set(db.publishTargets.filter(t => !registeredScreenIds.has(t.screenId)).map(t => t.screenId))];
+  for (const screenId of orphanedScreenIds) purgeScreenPublications(screenId);
+  if (heldAny || orphanedScreenIds.length) saveDB(db);
+  res.json(db.publishJobs.filter(j => req.user.role === 'ADMIN' || j.ownerId === req.user.id).sort((a,b) => b.createdAt.localeCompare(a.createdAt)).map(enrichJob));
+});
 app.get('/api/publications/:id', authMiddleware, (req: any, res: Response) => {
   const job = db.publishJobs.find(j => j.id === req.params.id);
   if (!job) return res.status(404).json({ error: 'Publication not found' });
@@ -1156,6 +1196,62 @@ app.post('/api/publications/:jobId/retry-failed', authMiddleware, (req: any, res
   for (const item of retried) notifyDevice(item.target.deviceId, 'CONTENT_UPDATE_AVAILABLE', { publishJobId: job.id, targetId: item.target.id, attemptId: item.attempt.id, manifestVersion: item.target.targetVersion });
   saveDB(db); logAudit(req.user.id, null, 'PUBLICATION_RETRY_ALL', { jobId: job.id, count: retried.length });
   res.json({ count: retried.length });
+});
+
+app.post('/api/publications/:jobId/targets/:targetId/cancel', authMiddleware, (req: any, res: Response) => {
+  const job = db.publishJobs.find(j => j.id === req.params.jobId);
+  const target = db.publishTargets.find(t => t.id === req.params.targetId && t.jobId === req.params.jobId);
+  if (!job || !target) return res.status(404).json({ error: 'Publication target not found' });
+  if (req.user.role !== 'ADMIN' && job.ownerId !== req.user.id) return res.status(403).json({ error: 'Access denied' });
+  if (target.status === 'PLAYING') return res.status(409).json({ error: 'A playing publication cannot be cancelled. Use rollback instead.' });
+  if (['SUPERSEDED', 'CANCELLED'].includes(target.status)) return res.status(409).json({ error: 'Publication is already inactive' });
+  target.status = 'CANCELLED';
+  target.cancelledAt = new Date().toISOString();
+  target.cancelledBy = req.user.id;
+  const attempt = db.publishAttempts.find(a => a.id === target.attemptId);
+  if (attempt) Object.assign(attempt, { status: 'CANCELLED', completedAt: target.cancelledAt });
+  saveDB(db);
+  notifyDevice(target.deviceId, 'CONTENT_UPDATE_CANCELLED', { publishJobId: job.id, targetId: target.id, manifestVersion: target.targetVersion });
+  logAudit(req.user.id, target.deviceId, 'PUBLICATION_CANCELLED', { jobId: job.id, targetId: target.id, version: target.targetVersion });
+  broadcastEvent('PUBLICATION_UPDATED', { jobId: job.id });
+  res.json(enrichJob(job));
+});
+
+app.post('/api/publications/:jobId/targets/:targetId/rollback', authMiddleware, (req: any, res: Response) => {
+  const sourceJob = db.publishJobs.find(j => j.id === req.params.jobId);
+  const source = db.publishTargets.find(t => t.id === req.params.targetId && t.jobId === req.params.jobId);
+  if (!sourceJob || !source) return res.status(404).json({ error: 'Publication target not found' });
+  if (req.user.role !== 'ADMIN' && sourceJob.ownerId !== req.user.id) return res.status(403).json({ error: 'Access denied' });
+  if (source.status !== 'PLAYING') return res.status(409).json({ error: 'Only an acknowledged PLAYING version can be restored' });
+  const screen = db.screens.find(s => s.id === source.screenId);
+  if (!screen || !canAccessScreen(req.user, screen)) return res.status(403).json({ error: 'Screen is unavailable' });
+
+  const now = new Date().toISOString();
+  const version = Math.max(0, ...db.publishJobs.map(j => Number(j.contentVersion) || 0)) + 1;
+  for (const pending of db.publishTargets.filter(t => t.screenId === source.screenId && !['PLAYING', 'FAILED', 'SUPERSEDED', 'CANCELLED'].includes(t.status))) {
+    pending.status = 'SUPERSEDED'; pending.supersededAt = now;
+  }
+  const job: any = {
+    id: 'job-' + crypto.randomUUID(), ownerId: sourceJob.ownerId, publisherId: req.user.id,
+    publisherName: req.user.name, idempotencyKey: 'rollback-' + crypto.randomUUID(),
+    sourceScreenId: source.screenId, playlistId: sourceJob.playlistId, layoutId: sourceJob.layoutId || null,
+    contentVersion: version, playlistVersion: source.playlistVersion, groupSnapshots: [], targetCount: 1,
+    rollbackOfJobId: sourceJob.id, rollbackOfVersion: source.targetVersion, createdAt: now
+  };
+  const target: any = {
+    ...source, id: 'target-' + crypto.randomUUID(), jobId: job.id, targetVersion: version,
+    status: 'QUEUED', progressPercent: 0, bytesDownloaded: 0, filesCompleted: 0,
+    activeVersion: null, previousActiveVersion: source.activeVersion || source.targetVersion,
+    errorCode: null, errorMessage: null, lastProgressAt: now, createdAt: now,
+    rollbackOfTargetId: source.id, attemptId: undefined, attemptNumber: undefined
+  };
+  db.publishJobs.push(job); db.publishTargets.push(target);
+  const attempt = startAttempt(target);
+  saveDB(db);
+  notifyDevice(target.deviceId, 'CONTENT_UPDATE_AVAILABLE', { publishJobId: job.id, targetId: target.id, attemptId: attempt.id, manifestVersion: version });
+  logAudit(req.user.id, target.deviceId, 'PUBLICATION_ROLLBACK_CREATED', { jobId: job.id, targetId: target.id, restoredFromJobId: sourceJob.id, restoredFromVersion: source.targetVersion, newVersion: version });
+  broadcastEvent('PUBLICATION_UPDATED', { jobId: job.id });
+  res.status(201).json(enrichJob(job));
 });
 
 // -------------------------------------------------------------
@@ -1208,7 +1304,7 @@ app.get('/api/screens', authMiddleware, (req: any, res: Response) => {
       itemCount: items.length,
       syncStatus: latestSync ? latestSync.status : 'UP_TO_DATE',
       appliedVersion: latestSync?.appliedVersion ?? (publishedPlaylist ? publishedPlaylist.version : 0),
-      desiredVersion: db.publishTargets.filter(t => t.screenId === screen.id && t.status !== 'SUPERSEDED').sort((a,b) => b.targetVersion - a.targetVersion)[0]?.targetVersion || 0,
+      desiredVersion: db.publishTargets.filter(t => t.screenId === screen.id && !['SUPERSEDED','CANCELLED'].includes(t.status)).sort((a,b) => b.targetVersion - a.targetVersion)[0]?.targetVersion || 0,
       activeVersion: db.publishTargets.filter(t => t.screenId === screen.id && t.status === 'PLAYING').sort((a,b) => b.targetVersion - a.targetVersion)[0]?.activeVersion || latestSync?.appliedVersion || 0,
       groupIds: db.screenGroupMembers.filter(m => m.screenId === screen.id).map(m => m.groupId),
       assignedPlaylist: db.playlists.find(p=>p.id===screen.assignedPlaylistId&&!p.deletedAt)||null,
@@ -1287,6 +1383,8 @@ app.delete('/api/screens/:id/unregister', authMiddleware, adminMiddleware, (req:
   db.playlists = db.playlists.filter(playlist => playlist.screenId !== screen.id);
   db.screenConfigurations = db.screenConfigurations.filter(config => config.screenId !== screen.id);
   db.deviceSyncs = db.deviceSyncs.filter(sync => sync.deviceId !== screen.deviceId);
+  db.screenGroupMembers = db.screenGroupMembers.filter(member => member.screenId !== screen.id);
+  purgeScreenPublications(screen.id);
   db.screens = db.screens.filter(item => item.id !== screen.id);
 
   if (device) {
@@ -1318,9 +1416,16 @@ app.post('/api/screens/:id/renew', authMiddleware, adminMiddleware, (req: any, r
   const renewalStart = currentExpiry.getTime() > Date.now() ? currentExpiry : new Date();
   screen.validUntil = addOneYear(renewalStart);
   screen.updatedAt = new Date().toISOString();
+  const resumedTargets = db.publishTargets.filter(t => t.screenId === screen.id && t.status === 'HELD');
+  for (const target of resumedTargets) {
+    delete target.heldAt;
+    delete target.heldFromStatus;
+    const attempt = startAttempt(target);
+    notifyDevice(target.deviceId, 'CONTENT_UPDATE_AVAILABLE', { publishJobId: target.jobId, targetId: target.id, attemptId: attempt.id, manifestVersion: target.targetVersion });
+  }
   saveDB(db);
 
-  logAudit(req.user.id, screen.deviceId, 'SCREEN_RENEWED', { screenId: screen.id, validUntil: screen.validUntil });
+  logAudit(req.user.id, screen.deviceId, 'SCREEN_RENEWED', { screenId: screen.id, validUntil: screen.validUntil, resumedUpdates: resumedTargets.length });
   notifyDevice(screen.deviceId, 'SCREEN_RENEWED', { screenId: screen.id, validUntil: screen.validUntil });
   broadcastEvent('SCREEN_LIST_UPDATED', { screenId: screen.id, renewed: true });
   res.json({ ...screen, isSuspended: false });
@@ -1761,7 +1866,7 @@ app.get('/api/device/manifest', deviceAuthMiddleware, (req: any, res: Response) 
   }
 
   const desiredTarget = db.publishTargets
-    .filter(t => t.deviceId === deviceId && !['SUPERSEDED', 'PLAYING'].includes(t.status))
+    .filter(t => t.deviceId === deviceId && !['SUPERSEDED', 'CANCELLED', 'PLAYING'].includes(t.status))
     .sort((a, b) => b.targetVersion - a.targetVersion)[0];
   if (desiredTarget) {
     return res.json({
@@ -1941,10 +2046,16 @@ app.post('/api/device/sync-status', deviceAuthMiddleware, (req: any, res: Respon
   const { publishJobId, targetId, attemptId, manifestVersion, eventId, eventSequence, status,
     bytesDownloaded, totalBytes, filesCompleted, totalFiles, currentFile, progressPercent,
     errorCode, errorMessage, activeVersion } = req.body;
-  if (!PUBLISH_STATES.includes(status) || status === 'SUPERSEDED') return res.status(400).json({ error: 'Invalid device status' });
+  if (!PUBLISH_STATES.includes(status) || ['SUPERSEDED', 'CANCELLED'].includes(status)) return res.status(400).json({ error: 'Invalid device status' });
   const target = db.publishTargets.find(t => t.id === targetId && t.jobId === publishJobId && t.deviceId === deviceId);
   if (!target || target.attemptId !== attemptId || target.targetVersion !== manifestVersion) return res.status(409).json({ error: 'Stale or mismatched publication attempt' });
-  const newest = db.publishTargets.filter(t => t.deviceId === deviceId && t.status !== 'SUPERSEDED').sort((a,b) => b.targetVersion - a.targetVersion)[0];
+  const screen = db.screens.find(s => s.id === target.screenId);
+  if (screen && isScreenSuspended(screen)) {
+    holdPendingPublications(screen);
+    saveDB(db);
+    return res.status(423).json({ error: 'Screen registration expired; update is on hold', code: 'SCREEN_SUSPENDED', validUntil: screen.validUntil });
+  }
+  const newest = db.publishTargets.filter(t => t.deviceId === deviceId && !['SUPERSEDED','CANCELLED'].includes(t.status)).sort((a,b) => b.targetVersion - a.targetVersion)[0];
   if (!newest || newest.id !== target.id) return res.status(409).json({ error: 'Publication was superseded' });
   const attempt = db.publishAttempts.find(a => a.id === attemptId);
   if (!attempt) return res.status(404).json({ error: 'Attempt not found' });

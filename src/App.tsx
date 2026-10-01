@@ -22,6 +22,7 @@ export function App() {
   const [path, setPath] = useState(window.location.pathname);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'screens' | 'playlists' | 'media' | 'settings' | 'network' | 'users'>('dashboard');
   const [selectedScreenId, setSelectedScreenId] = useState<string | null>(null);
+  const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
   const [isRegisterOpen, setIsRegisterOpen] = useState(false);
   const [registerInitialCode, setRegisterInitialCode] = useState('');
   const [user, setUser] = useState<DashboardUser | null>(null);
@@ -259,6 +260,11 @@ export function App() {
                 screenId={selectedScreenId}
                 onBack={() => setSelectedScreenId(null)}
                 mediaAssets={mediaAssets}
+                onEditPlaylist={(playlistId) => {
+                  setSelectedPlaylistId(playlistId);
+                  setSelectedScreenId(null);
+                  setActiveTab('playlists');
+                }}
               />
             ) : (
               <>
@@ -277,7 +283,7 @@ export function App() {
         )}
 
         {/* MEDIA LIBRARY TAB */}
-        {activeTab === 'playlists' && <PlaylistPageV2 assets={mediaAssets} onMediaChanged={loadData} />}
+        {activeTab === 'playlists' && <PlaylistPageV2 assets={mediaAssets} onMediaChanged={loadData} initialPlaylistId={selectedPlaylistId} />}
         {activeTab === 'settings' && user.role === 'ADMIN' && <GeneralSettings />}
 
         {/* MEDIA LIBRARY TAB */}

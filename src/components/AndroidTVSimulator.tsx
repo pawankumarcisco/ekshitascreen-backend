@@ -235,9 +235,17 @@ export const AndroidTVSimulator: React.FC<AndroidTVSimulatorProps> = ({
   };
 
   const currentItem = cachedItems[currentSlideIndex];
+  const transition = String(manifest?.screenConfiguration?.transition || manifest?.settings?.transition || 'FADE').toUpperCase();
+  const transitionDuration = Number(manifest?.screenConfiguration?.transitionDurationMs || manifest?.settings?.transitionDurationMs || 400);
+  const transitionAnimation: Record<string, string> = {
+    NONE: 'none', FADE: 'simFade', SLIDE: 'simSlideLeft', SLIDE_LEFT: 'simSlideLeft',
+    SLIDE_RIGHT: 'simSlideRight', SLIDE_UP: 'simSlideUp', SLIDE_DOWN: 'simSlideDown',
+    ZOOM_IN: 'simZoomIn', ZOOM_OUT: 'simZoomOut', FADE_ZOOM: 'simFadeZoom'
+  };
 
   return (
     <div className="space-y-6">
+      <style>{`@keyframes simFade{from{opacity:0}to{opacity:1}}@keyframes simSlideLeft{from{opacity:.4;transform:translateX(100%)}to{opacity:1;transform:none}}@keyframes simSlideRight{from{opacity:.4;transform:translateX(-100%)}to{opacity:1;transform:none}}@keyframes simSlideUp{from{opacity:.4;transform:translateY(100%)}to{opacity:1;transform:none}}@keyframes simSlideDown{from{opacity:.4;transform:translateY(-100%)}to{opacity:1;transform:none}}@keyframes simZoomIn{from{opacity:0;transform:scale(.82)}to{opacity:1;transform:scale(1)}}@keyframes simZoomOut{from{opacity:0;transform:scale(1.18)}to{opacity:1;transform:scale(1)}}@keyframes simFadeZoom{from{opacity:0;transform:scale(.94)}to{opacity:1;transform:scale(1)}}`}</style>
       {/* Top Banner and Hardware Controls */}
       <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-xs flex flex-wrap items-center justify-between gap-4">
         <div>
@@ -399,7 +407,8 @@ export const AndroidTVSimulator: React.FC<AndroidTVSimulatorProps> = ({
                     key={currentSlideIndex}
                     src={currentItem.downloadUrl || '/storage/media/' + currentItem.assetId}
                     alt={currentItem.filename}
-                    className="w-full h-full object-contain animate-fadeIn"
+                    className="w-full h-full object-contain"
+                    style={{ animation: `${transitionAnimation[transition] || 'simFade'} ${transition === 'NONE' ? 0 : transitionDuration}ms ease both` }}
                     onError={(e) => {
                       (e.currentTarget as HTMLImageElement).src = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 24 24" fill="none" stroke="%2338bdf8" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>';
                     }}

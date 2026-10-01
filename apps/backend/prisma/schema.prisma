@@ -37,6 +37,7 @@ enum SyncStatus {
 
 enum PublishTargetStatus {
   QUEUED
+  HELD
   DOWNLOADING
   VERIFYING
   READY

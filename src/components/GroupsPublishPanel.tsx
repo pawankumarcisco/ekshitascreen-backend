@@ -1,5 +1,5 @@
 import React from 'react';
-import { Layers, Plus, Send, RefreshCw, Trash2, X } from 'lucide-react';
+import { Layers, Plus, Send, RefreshCw, Trash2, X, RotateCcw } from 'lucide-react';
 import { api } from '../services/api';
 import type { ContentLayout, ContentPlaylist, PublishJob, Screen, ScreenGroup } from '../types';
 
@@ -74,7 +74,11 @@ export function GroupsPublishPanel({ screens, onFilter }: { screens: Screen[]; o
             <span>{t.screen?.name || t.screenNameSnapshot} <i className="text-slate-400">{t.screen?.device?.isOnline ? 'online' : 'offline'}</i></span>
             <span className="font-medium">{t.status}</span><span>v{t.activeVersion || 0} / desired v{t.targetVersion}</span>
             <span>{t.progressPercent}% · {t.filesCompleted}/{t.totalFiles} files {t.errorMessage && <b className="text-rose-600">{t.errorMessage}</b>}</span>
-            {t.status === 'FAILED' && <button onClick={async () => { await api.retryPublishTarget(job.id, t.id); await load(); }} className="text-sky-700">Retry</button>}
+            <span className="flex items-center justify-end gap-2">
+              {t.status === 'FAILED' && <button onClick={async () => { await api.retryPublishTarget(job.id, t.id); await load(); }} className="text-sky-700">Retry</button>}
+              {!['PLAYING', 'SUPERSEDED', 'CANCELLED'].includes(t.status) && <button title="Cancel update" onClick={async () => { if (!confirm(`Cancel content v${job.contentVersion} for ${t.screen?.name || t.screenNameSnapshot}?`)) return; try { await api.cancelPublicationTarget(job.id, t.id); await load(); } catch (e) { setError(e instanceof Error ? e.message : 'Cancel failed'); } }} className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded"><Trash2 className="w-3.5 h-3.5"/></button>}
+              {t.status === 'PLAYING' && <button title="Restore this version" onClick={async () => { if (!confirm(`Restore content v${job.contentVersion} on ${t.screen?.name || t.screenNameSnapshot}? This creates a new publication version.`)) return; try { await api.rollbackPublicationTarget(job.id, t.id); await load(); } catch (e) { setError(e instanceof Error ? e.message : 'Rollback failed'); } }} className="inline-flex items-center gap-1 text-sky-700 hover:text-sky-900"><RotateCcw className="w-3.5 h-3.5"/>Restore</button>}
+            </span>
           </div>)}</div>
         </div>)}
       </div>

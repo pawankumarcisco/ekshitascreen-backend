@@ -11,7 +11,8 @@ import {
   RefreshCw,
   CheckCircle,
   AlertTriangle,
-  Monitor
+  Monitor,
+  Send
 } from 'lucide-react';
 import { Screen, ScreenConfiguration, Playlist, MediaAsset } from '../types';
 import { PlaylistEditor } from './PlaylistEditor';
@@ -21,12 +22,14 @@ interface ScreenDetailProps {
   screenId: string;
   onBack: () => void;
   mediaAssets: MediaAsset[];
+  onEditPlaylist: (playlistId: string) => void;
 }
 
 export const ScreenDetail: React.FC<ScreenDetailProps> = ({
   screenId,
   onBack,
-  mediaAssets
+  mediaAssets,
+  onEditPlaylist
 }) => {
   const [screen, setScreen] = useState<Screen | null>(null);
   const [config, setConfig] = useState<ScreenConfiguration | null>(null);
@@ -34,6 +37,8 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
   const [draftPlaylist, setDraftPlaylist] = useState<Playlist | null>(null);
   const [loading, setLoading] = useState(true);
   const [configSaving, setConfigSaving] = useState(false);
+  const [configPublishing, setConfigPublishing] = useState(false);
+  const [configPublishMessage, setConfigPublishMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [activeSlideIndex, setActiveSlideIndex] = useState(0);
   const [previewPlaying, setPreviewPlaying] = useState(true);
 
@@ -64,7 +69,11 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
   }, [screenId]);
 
   // Slideshow preview interval runner
-  const activeItems = (publishedPlaylist?.items || draftPlaylist?.items || []).filter(i => i.enabled);
+  const activeItems = (
+    screen?.assignedPlaylist?.items?.length
+      ? screen.assignedPlaylist.items
+      : (publishedPlaylist?.items || draftPlaylist?.items || [])
+  ).filter(i => i.enabled);
 
   useEffect(() => {
     if (!previewPlaying || activeItems.length <= 1) return;
@@ -91,6 +100,50 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
       console.error('Failed to save configuration', e);
     } finally {
       setConfigSaving(false);
+    }
+  };
+
+  const handleConfigPublish = async () => {
+    if (!config) return;
+
+    setConfigPublishing(true);
+    setConfigPublishMessage(null);
+    try {
+      const draft = await api.getGeneralSettingsDraft('SCREEN', screenId);
+      const imageFit = config.fitMode === 'FILL'
+        ? 'COVER'
+        : config.fitMode === 'STRETCH'
+          ? 'STRETCH'
+          : 'CONTAIN';
+      const overrides = {
+        ...(draft.overrides || {}),
+        resolutionWidth: config.width,
+        resolutionHeight: config.height,
+        orientation: config.orientation,
+        contentRotation: config.rotation,
+        imageFit,
+        defaultSlideDurationSeconds: config.intervalSeconds,
+        transition: config.transition,
+        transitionDurationMs: config.transitionDurationMs,
+        playbackOrder: config.shuffle ? 'SHUFFLE' : 'PLAYLIST_ORDER',
+        repeatPlaylist: config.loop,
+        startOnBoot: config.autoStart
+      };
+
+      await api.saveGeneralSettingsDraft('SCREEN', screenId, overrides);
+      const publication = await api.publishGeneralSettings('SCREEN', screenId);
+      const targetCount = publication.targets?.length || 0;
+      setConfigPublishMessage({
+        type: 'success',
+        text: `Published to ${targetCount} Android player${targetCount === 1 ? '' : 's'}.`
+      });
+    } catch (error) {
+      setConfigPublishMessage({
+        type: 'error',
+        text: error instanceof Error ? error.message : 'Failed to publish player settings.'
+      });
+    } finally {
+      setConfigPublishing(false);
     }
   };
 
@@ -264,12 +317,30 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
                 <h3 className="text-sm font-semibold text-slate-900">Screen Configuration</h3>
                 <p className="text-xs text-slate-500">Resolution, interval, rotation & transitions</p>
               </div>
-              {configSaving && (
-                <span className="text-[11px] text-sky-600 font-medium flex items-center gap-1">
-                  <RefreshCw className="w-3 h-3 animate-spin" /> Saving...
-                </span>
-              )}
+              <div className="flex items-center gap-2">
+                {configSaving && (
+                  <span className="text-[11px] text-sky-600 font-medium flex items-center gap-1">
+                    <RefreshCw className="w-3 h-3 animate-spin" /> Saving...
+                  </span>
+                )}
+                <button
+                  onClick={handleConfigPublish}
+                  disabled={!config || configSaving || configPublishing}
+                  title="Publish configuration to the Android player"
+                  className="inline-flex items-center gap-1 rounded-md bg-sky-600 px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {configPublishing ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Send className="w-3 h-3" />}
+                  {configPublishing ? 'Publishing...' : 'Publish'}
+                </button>
+              </div>
             </div>
+
+            {configPublishMessage && (
+              <div className={`mb-3 flex items-center gap-1.5 rounded-md px-2.5 py-2 text-[11px] ${configPublishMessage.type === 'success' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>
+                {configPublishMessage.type === 'success' ? <CheckCircle className="w-3.5 h-3.5 shrink-0" /> : <AlertTriangle className="w-3.5 h-3.5 shrink-0" />}
+                <span>{configPublishMessage.text}</span>
+              </div>
+            )}
 
             <div className="space-y-3.5 text-xs">
               {/* Resolution Profile */}
@@ -360,7 +431,13 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
                     className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:ring-1 focus:ring-sky-500"
                   >
                     <option value="FADE">Fade (Cross-dissolve)</option>
-                    <option value="SLIDE">Slide Horizontal</option>
+                    <option value="SLIDE_LEFT">Slide Left</option>
+                    <option value="SLIDE_RIGHT">Slide Right</option>
+                    <option value="SLIDE_UP">Slide Up</option>
+                    <option value="SLIDE_DOWN">Slide Down</option>
+                    <option value="ZOOM_IN">Zoom In</option>
+                    <option value="ZOOM_OUT">Zoom Out</option>
+                    <option value="FADE_ZOOM">Fade + Zoom</option>
                     <option value="NONE">None (Instant Cut)</option>
                   </select>
                 </div>
@@ -429,6 +506,7 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
         publishedPlaylist={publishedPlaylist}
         draftPlaylist={draftPlaylist}
         assignedPlaylist={screen.assignedPlaylist}
+        onEditPlaylist={onEditPlaylist}
         mediaAssets={mediaAssets}
         onSaveDraft={handleSaveDraft}
         onPublish={handlePublish}

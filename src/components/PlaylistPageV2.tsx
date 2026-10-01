@@ -5,7 +5,7 @@ import type { ContentPlaylist, MediaAsset } from '../types';
 
 const input = 'border border-sky-100 rounded px-2 py-1.5 text-xs';
 
-export function PlaylistPageV2({ assets, onMediaChanged }: { assets: MediaAsset[]; onMediaChanged: () => Promise<void> }) {
+export function PlaylistPageV2({ assets, onMediaChanged, initialPlaylistId }: { assets: MediaAsset[]; onMediaChanged: () => Promise<void>; initialPlaylistId?: string | null }) {
   const [playlists, setPlaylists] = React.useState<ContentPlaylist[]>([]);
   const [selected, setSelected] = React.useState<ContentPlaylist | null>(null);
   const [items, setItems] = React.useState<any[]>([]);
@@ -18,6 +18,12 @@ export function PlaylistPageV2({ assets, onMediaChanged }: { assets: MediaAsset[
 
   const load = React.useCallback(async () => setPlaylists(await api.getContentPlaylists()), []);
   React.useEffect(() => { load().catch(e => setMessage(e.message)); }, [load]);
+
+  React.useEffect(() => {
+    if (!initialPlaylistId || selected?.id === initialPlaylistId) return;
+    const playlist = playlists.find(item => item.id === initialPlaylistId);
+    if (playlist) choose(playlist);
+  }, [initialPlaylistId, playlists, selected?.id]);
 
   const choose = (playlist: ContentPlaylist) => {
     setSelected({ ...playlist });

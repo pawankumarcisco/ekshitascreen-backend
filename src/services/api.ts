@@ -238,6 +238,14 @@ export const api = {
     const res = await fetch(`/api/publications/${jobId}/retry-failed`, { method: 'POST', headers: authHeaders() });
     const data = await readJson(res); if (!res.ok) throw new Error(data.error || 'Retry failed');
   },
+  async cancelPublicationTarget(jobId: string, targetId: string): Promise<void> {
+    const res = await fetch(`/api/publications/${jobId}/targets/${targetId}/cancel`, { method: 'POST', headers: authHeaders() });
+    const data = await readJson(res); if (!res.ok) throw new Error(data.error || 'Cancel failed');
+  },
+  async rollbackPublicationTarget(jobId: string, targetId: string): Promise<PublishJob> {
+    const res = await fetch(`/api/publications/${jobId}/targets/${targetId}/rollback`, { method: 'POST', headers: authHeaders() });
+    const data = await readJson(res); if (!res.ok) throw new Error(data.error || 'Rollback failed'); return data;
+  },
   async getContentPlaylists(): Promise<ContentPlaylist[]> { const r=await fetch('/api/content/playlists',{headers:authHeaders()});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d; },
   async createContentPlaylist(payload:any): Promise<ContentPlaylist> { const r=await fetch('/api/content/playlists',{method:'POST',headers:authHeaders(),body:JSON.stringify(payload)});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d; },
   async updateContentPlaylist(id:string,payload:any): Promise<ContentPlaylist> { const r=await fetch(`/api/content/playlists/${id}`,{method:'PATCH',headers:authHeaders(),body:JSON.stringify(payload)});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d; },

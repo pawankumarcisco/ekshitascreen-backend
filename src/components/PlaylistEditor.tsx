@@ -14,7 +14,8 @@ import {
   Image as ImageIcon,
   ArrowUp,
   ArrowDown
-  ,ListPlus
+  ,ListPlus,
+  Pencil
 } from 'lucide-react';
 import { PlaylistItem, MediaAsset, Playlist, ContentPlaylist } from '../types';
 import { api } from '../services/api';
@@ -27,6 +28,7 @@ interface PlaylistEditorProps {
   mediaAssets: MediaAsset[];
   onSaveDraft: (items: any[]) => Promise<void>;
   onPublish: () => Promise<void>;
+  onEditPlaylist: (playlistId: string) => void;
   appliedVersion?: number;
   publishedVersion?: number;
 }
@@ -39,6 +41,7 @@ export const PlaylistEditor: React.FC<PlaylistEditorProps> = ({
   mediaAssets,
   onSaveDraft,
   onPublish,
+  onEditPlaylist,
   appliedVersion = 0,
   publishedVersion = 0
 }) => {
@@ -78,7 +81,23 @@ export const PlaylistEditor: React.FC<PlaylistEditorProps> = ({
     }
   }, [showPlaylistSelector, message, availablePlaylists, assignedPlaylistId]);
 
-  const displayedItems = items.map((item, index) => ({ item, index, source: 'image' as const }));
+  const assignedItems = assignedPlaylist?.items || [];
+  const displayedItems = [
+    ...assignedItems.map((item, index) => ({ item, index, source: 'playlist' as const })),
+    ...items.map((item, index) => ({ item, index, source: 'image' as const }))
+  ];
+
+  const handleUnassignPlaylist = async () => {
+    if (!assignedPlaylist) return;
+    try {
+      await api.assignPlaylist(screenId, null);
+      setAssignedPlaylist(null);
+      setAssignedPlaylistId('');
+      setMessage({ text: 'Playlist removed from this screen.', type: 'success' });
+    } catch (error) {
+      setMessage({ text: error instanceof Error ? error.message : 'Failed to remove playlist.', type: 'error' });
+    }
+  };
 
   const handleDurationChange = (index: number, seconds: number) => {
     const updated = [...items];
@@ -159,7 +178,9 @@ export const PlaylistEditor: React.FC<PlaylistEditorProps> = ({
   };
 
   const handlePublish = async () => {
-    const enabledItems = items.filter(i => i.enabled);
+    const enabledItems = assignedPlaylist
+      ? (assignedPlaylist.items || []).filter(i => i.enabled)
+      : items.filter(i => i.enabled);
     if (enabledItems.length === 0) {
       setMessage({ text: 'Cannot publish an empty playlist. Please add at least one enabled image.', type: 'error' });
       return;
@@ -168,6 +189,11 @@ export const PlaylistEditor: React.FC<PlaylistEditorProps> = ({
     setPublishing(true);
     setMessage(null);
     try {
+      if (assignedPlaylist) {
+        await api.publishAssignedPlaylist(screenId, assignedPlaylist.id);
+        setMessage({ text: 'Assigned playlist published successfully! Android TV notified via WebSocket.', type: 'success' });
+        return;
+      }
       // Save draft first if there are unpersisted edits
       const payload = items.map((item, idx) => ({
         mediaAssetId: item.mediaAssetId,
@@ -285,7 +311,15 @@ export const PlaylistEditor: React.FC<PlaylistEditorProps> = ({
                     </p>
                   </div>
                 </div>
-                <span className="rounded-full bg-violet-100 text-violet-700 px-2.5 py-1 text-[10px] font-semibold">Playlist</span>
+                <div className="flex items-center gap-1.5">
+                  <button onClick={() => onEditPlaylist(assignedPlaylist.id)} className="p-1.5 text-slate-400 hover:text-sky-600 hover:bg-sky-50 rounded-md transition-colors" title="Edit playlist">
+                    <Pencil className="w-4 h-4" />
+                  </button>
+                  <button onClick={handleUnassignPlaylist} className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors" title="Remove playlist from screen">
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                  <span className="rounded-full bg-violet-100 text-violet-700 px-2.5 py-1 text-[10px] font-semibold">Playlist</span>
+                </div>
               </div>
             )}
             {displayedItems.map(({ item, index, source }, displayIndex) => {
@@ -306,7 +340,7 @@ export const PlaylistEditor: React.FC<PlaylistEditorProps> = ({
                     <div className="flex flex-col gap-0.5 text-slate-400">
                       <button
                         onClick={() => handleMove(index, 'up')}
-                        disabled={index === 0}
+                        disabled={source === 'playlist' || index === 0}
                         className="hover:text-slate-700 disabled:opacity-20 p-0.5"
                         title="Move Up"
                       >
@@ -314,7 +348,7 @@ export const PlaylistEditor: React.FC<PlaylistEditorProps> = ({
                       </button>
                       <button
                         onClick={() => handleMove(index, 'down')}
-                        disabled={index === items.length - 1}
+                        disabled={source === 'playlist' || index === items.length - 1}
                         className="hover:text-slate-700 disabled:opacity-20 p-0.5"
                         title="Move Down"
                       >
@@ -389,7 +423,7 @@ export const PlaylistEditor: React.FC<PlaylistEditorProps> = ({
                     </button>
 
                     <button
-                      onClick={() => handleRemoveItem(index)}
+                      onClick={() => source === 'image' ? handleRemoveItem(index) : onEditPlaylist(assignedPlaylist!.id)}
                       disabled={source === 'playlist'}
                       className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors disabled:cursor-not-allowed disabled:opacity-40"
                       title={source === 'playlist' ? 'Edit this item in the assigned playlist' : 'Remove from playlist'}
@@ -407,7 +441,7 @@ export const PlaylistEditor: React.FC<PlaylistEditorProps> = ({
       {/* Footer Actions: Save Draft & Publish to Screen */}
       <div className="px-6 py-4 bg-slate-50/75 border-t border-slate-100 flex items-center justify-between">
         <div className="text-xs text-slate-500">
-          Total slides: <span className="font-semibold text-slate-800">{items.filter(i => i.enabled).length}</span> enabled
+          Total slides: <span className="font-semibold text-slate-800">{displayedItems.filter(({ item }) => item.enabled).length}</span> enabled
         </div>
 
         <div className="flex items-center gap-3">
@@ -422,7 +456,7 @@ export const PlaylistEditor: React.FC<PlaylistEditorProps> = ({
 
           <button
             onClick={handlePublish}
-            disabled={saving || publishing || items.filter(i => i.enabled).length === 0}
+            disabled={saving || publishing || displayedItems.filter(({ item }) => item.enabled).length === 0}
             className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-700 active:bg-sky-800 rounded-lg shadow-sm transition-colors disabled:opacity-50"
           >
             {publishing ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}

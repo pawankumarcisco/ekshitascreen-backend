@@ -5,7 +5,7 @@ export type ActivationStatus = 'PENDING' | 'ACTIVATED' | 'EXPIRED' | 'CANCELLED'
 export type PlaylistStatus = 'DRAFT' | 'PUBLISHED' | 'ARCHIVED';
 
 export type SyncStatus = 'PENDING' | 'DOWNLOADING' | 'VERIFYING' | 'APPLYING' | 'COMPLETED' | 'FAILED' | 'UP_TO_DATE';
-export type PublishStatus = 'QUEUED' | 'DOWNLOADING' | 'VERIFYING' | 'READY' | 'PLAYING' | 'FAILED' | 'SUPERSEDED';
+export type PublishStatus = 'QUEUED' | 'HELD' | 'DOWNLOADING' | 'VERIFYING' | 'READY' | 'PLAYING' | 'FAILED' | 'SUPERSEDED' | 'CANCELLED';
 
 export interface ScreenGroup {
   id: string; name: string; description?: string; ownerId: string; isActive: boolean;
@@ -40,7 +40,7 @@ export type Orientation = 'LANDSCAPE' | 'PORTRAIT';
 
 export type FitMode = 'FIT' | 'FILL' | 'STRETCH' | 'CENTER';
 
-export type TransitionType = 'NONE' | 'FADE' | 'SLIDE';
+export type TransitionType = 'NONE' | 'FADE' | 'SLIDE' | 'SLIDE_LEFT' | 'SLIDE_RIGHT' | 'SLIDE_UP' | 'SLIDE_DOWN' | 'ZOOM_IN' | 'ZOOM_OUT' | 'FADE_ZOOM';
 
 export interface DashboardUser {
   id: string;
