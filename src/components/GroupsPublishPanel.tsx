@@ -1,7 +1,7 @@
 import React from 'react';
 import { Layers, Plus, Send, RefreshCw, Trash2, X } from 'lucide-react';
 import { api } from '../services/api';
-import type { PublishJob, Screen, ScreenGroup } from '../types';
+import type { ContentLayout, ContentPlaylist, PublishJob, Screen, ScreenGroup } from '../types';
 
 export function GroupsPublishPanel({ screens, onFilter }: { screens: Screen[]; onFilter: (ids: string[] | null) => void }) {
   const [groups, setGroups] = React.useState<ScreenGroup[]>([]);
@@ -12,13 +12,17 @@ export function GroupsPublishPanel({ screens, onFilter }: { screens: Screen[]; o
   const [selectedScreens, setSelectedScreens] = React.useState<string[]>([]);
   const [selectedGroups, setSelectedGroups] = React.useState<string[]>([]);
   const [sourceScreenId, setSourceScreenId] = React.useState('');
+  const [playlistId, setPlaylistId] = React.useState('');
+  const [layoutId, setLayoutId] = React.useState('');
+  const [playlists, setPlaylists] = React.useState<ContentPlaylist[]>([]);
+  const [layouts, setLayouts] = React.useState<ContentLayout[]>([]);
   const [busy, setBusy] = React.useState(false);
   const [query, setQuery] = React.useState('');
   const [error, setError] = React.useState('');
 
   const load = React.useCallback(async () => {
-    const [g, j] = await Promise.all([api.getScreenGroups(), api.getPublications()]);
-    setGroups(g); setJobs(j);
+    const [g, j, p, l] = await Promise.all([api.getScreenGroups(), api.getPublications(), api.getContentPlaylists(), api.getLayouts()]);
+    setGroups(g); setJobs(j); setPlaylists(p); setLayouts(l);
   }, []);
   React.useEffect(() => { load().catch(e => setError(e.message)); }, [load]);
   React.useEffect(() => {
@@ -38,7 +42,7 @@ export function GroupsPublishPanel({ screens, onFilter }: { screens: Screen[]; o
   async function publish() {
     setBusy(true); setError('');
     try {
-      await api.createPublication({ sourceScreenId, screenIds: selectedScreens, groupIds: selectedGroups, idempotencyKey: crypto.randomUUID() });
+      await api.createPublication({ sourceScreenId, screenIds: selectedScreens, groupIds: selectedGroups, playlistId: playlistId || undefined, layoutId: layoutId || undefined, idempotencyKey: crypto.randomUUID() });
       setModal(null); setSelectedScreens([]); setSelectedGroups([]); await load();
     } catch (e) { setError(e instanceof Error ? e.message : 'Publish failed'); } finally { setBusy(false); }
   }
@@ -81,6 +85,8 @@ export function GroupsPublishPanel({ screens, onFilter }: { screens: Screen[]; o
         <div className="flex justify-between mb-3"><div><h3 className="text-base font-semibold">{modal === 'group' ? 'Create screen group' : 'Publish to screens'}</h3><p className="text-xs text-slate-500">{modal === 'group' ? 'Screens can belong to multiple groups.' : 'Targets are resolved and deduplicated by the server.'}</p></div><button onClick={() => setModal(null)}><X className="w-4 h-4"/></button></div>
         {modal === 'group' ? <div className="grid gap-2 mb-3"><input value={name} onChange={e => setName(e.target.value)} placeholder="Group name" className="border border-sky-100 rounded px-3 py-2 text-sm"/><input value={description} onChange={e => setDescription(e.target.value)} placeholder="Description (optional)" className="border border-sky-100 rounded px-3 py-2 text-sm"/></div> :
           <div className="grid gap-2 mb-3"><label className="text-xs font-medium">Playlist/configuration source</label><select value={sourceScreenId} onChange={e => setSourceScreenId(e.target.value)} className="border border-sky-100 rounded px-3 py-2 text-sm"><option value="">Select a screen with a saved draft</option>{screens.map(s => <option key={s.id} value={s.id}>{s.name} · draft v{s.draftVersion || 1}</option>)}</select>
+          <select value={playlistId} onChange={e=>setPlaylistId(e.target.value)} className="border border-sky-100 rounded px-3 py-2 text-sm"><option value="">Use source screen draft</option>{playlists.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select>
+          <select value={layoutId} onChange={e=>setLayoutId(e.target.value)} className="border border-sky-100 rounded px-3 py-2 text-sm"><option value="">Use screen/default layout</option>{layouts.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}</select>
           <label className="text-xs font-medium mt-1">Groups</label><div className="flex flex-wrap gap-2">{groups.filter(g => g.isActive).map(g => <label key={g.id} className="text-xs border border-sky-100 rounded px-2 py-1"><input type="checkbox" checked={selectedGroups.includes(g.id)} onChange={() => toggle(g.id, setSelectedGroups)} className="mr-1"/>{g.name} ({g.totalScreens})</label>)}</div></div>}
         <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search screens" className="w-full border border-sky-100 rounded px-3 py-2 text-sm mb-2"/>
         <div className="max-h-52 overflow-auto border border-sky-50 rounded divide-y divide-sky-50">{visible.map(s => <label key={s.id} className="flex items-center justify-between px-3 py-2 text-xs"><span><input type="checkbox" checked={selectedScreens.includes(s.id)} onChange={() => toggle(s.id, setSelectedScreens)} className="mr-2"/>{s.name} · {s.location || 'No location'}</span><span className={s.device?.isOnline ? 'text-emerald-600' : 'text-slate-400'}>{s.device?.isOnline ? 'Online' : 'Offline'}</span></label>)}</div>

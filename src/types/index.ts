@@ -31,6 +31,11 @@ export interface PublishJob {
   targetCount: number; createdAt: string; targets: PublishTarget[]; counts: Record<string, number>;
 }
 
+export interface ContentPlaylist extends Playlist { name: string; description?: string; assignedScreens?: Array<{id:string;name:string}>; imageCount?:number; totalDurationSeconds?:number; expiryState?: 'ACTIVE'|'EXPIRING_SOON'|'EXPIRED'; }
+export interface LayoutZone { id: string; name: string; type: 'MEDIA'|'TICKER'; x: number; y: number; width: number; height: number; enabled: boolean; playlistId?: string|null; fitMode?: FitMode; text?: string; fontSize?: number; color?: string; backgroundColor?: string; scrollDirection?: string; scrollSpeed?: number; }
+export interface ContentLayout { id: string; name: string; width: number; height: number; orientation: Orientation; backgroundColor: string; template: string; zones: LayoutZone[]; version: number; }
+export interface ContentSchedule { id: string; name: string; playlistId: string; layoutId?: string|null; screenIds: string[]; groupIds: string[]; weekdays: number[]; startDate: string; endDate?: string|null; startTime: string; endTime: string; allDay: boolean; timezone: string; priority: number; enabled: boolean; }
+
 export type Orientation = 'LANDSCAPE' | 'PORTRAIT';
 
 export type FitMode = 'FIT' | 'FILL' | 'STRETCH' | 'CENTER';
@@ -141,6 +146,10 @@ export interface Screen {
   desiredVersion?: number;
   activeVersion?: number;
   groupIds?: string[];
+  assignedPlaylistId?: string|null;
+  assignedPlaylist?: ContentPlaylist|null;
+  unpublishedChanges?: boolean;
+  latestSync?: DeviceSyncRecord;
   lastSeenAt?: string | null;
 }
 

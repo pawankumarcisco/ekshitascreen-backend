@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+﻿import React, { useState, useEffect } from 'react';
 import {
   ArrowLeft,
   Tv,
@@ -40,10 +40,14 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
   const fetchScreenData = async () => {
     try {
       setLoading(true);
-      const [screenData, playlistData] = await Promise.all([
+      const [screenData, playlistData, contentPlaylists] = await Promise.all([
         api.getScreen(screenId),
-        api.getScreenPlaylist(screenId)
+        api.getScreenPlaylist(screenId),
+        api.getContentPlaylists()
       ]);
+      if (screenData.assignedPlaylistId) {
+        screenData.assignedPlaylist = contentPlaylists.find(playlist => playlist.id === screenData.assignedPlaylistId) || screenData.assignedPlaylist;
+      }
       setScreen(screenData);
       setConfig(screenData.configuration || null);
       setPublishedPlaylist(playlistData.published);
@@ -156,7 +160,7 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
                 </div>
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
-                {screen.location ? `${screen.location} · ` : ''}Device UID: <span className="font-mono">{screen.device?.deviceUid}</span>
+                {screen.location ? `${screen.location} Â· ` : ''}Device UID: <span className="font-mono">{screen.device?.deviceUid}</span>
               </p>
             </div>
           </div>
@@ -173,6 +177,8 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
         </div>
       </div>
 
+
+      {/* Existing screen preview and legacy per-screen editor remain compatible. */}
       {/* Two Column Grid: Screen Preview & Screen Configuration */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Left: Screen Live Preview */}
@@ -277,9 +283,9 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
                   }}
                   className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-slate-800 font-mono focus:outline-none focus:ring-1 focus:ring-sky-500"
                 >
-                  <option value="1920x1080">1920 × 1080 (Full HD 1080p - Recommended)</option>
-                  <option value="1280x720">1280 × 720 (HD 720p)</option>
-                  <option value="3840x2160">3840 × 2160 (Ultra HD 4K)</option>
+                  <option value="1920x1080">1920 Ã— 1080 (Full HD 1080p - Recommended)</option>
+                  <option value="1280x720">1280 Ã— 720 (HD 720p)</option>
+                  <option value="3840x2160">3840 Ã— 2160 (Ultra HD 4K)</option>
                 </select>
               </div>
 
@@ -304,10 +310,10 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
                     onChange={(e) => handleConfigChange({ rotation: Number(e.target.value) })}
                     className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-slate-800 font-mono focus:outline-none focus:ring-1 focus:ring-sky-500"
                   >
-                    <option value="0">0° (Standard)</option>
-                    <option value="90">90° Clockwise</option>
-                    <option value="180">180° Inverted</option>
-                    <option value="270">270° Counter-Clockwise</option>
+                    <option value="0">0Â° (Standard)</option>
+                    <option value="90">90Â° Clockwise</option>
+                    <option value="180">180Â° Inverted</option>
+                    <option value="270">270Â° Counter-Clockwise</option>
                   </select>
                 </div>
               </div>
@@ -412,7 +418,7 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
           </div>
 
           <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400 font-mono">
-            Config revision: #{config?.version || 1} · Last updated: {new Date(config?.updatedAt || Date.now()).toLocaleTimeString()}
+            Config revision: #{config?.version || 1} Â· Last updated: {new Date(config?.updatedAt || Date.now()).toLocaleTimeString()}
           </div>
         </div>
       </div>
@@ -422,6 +428,7 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
         screenId={screenId}
         publishedPlaylist={publishedPlaylist}
         draftPlaylist={draftPlaylist}
+        assignedPlaylist={screen.assignedPlaylist}
         mediaAssets={mediaAssets}
         onSaveDraft={handleSaveDraft}
         onPublish={handlePublish}

@@ -7,6 +7,7 @@ import {
   HealthCheckResponse
 } from '../types';
 import type { ScreenGroup, PublishJob } from '../types';
+import type { ContentPlaylist, ContentLayout, ContentSchedule } from '../types';
 
 let authToken: string | null = localStorage.getItem('screencast_token');
 
@@ -221,7 +222,7 @@ export const api = {
     const res = await fetch('/api/publications/resolve-targets', { method: 'POST', headers: authHeaders(), body: JSON.stringify({ screenIds, groupIds }) });
     const data = await readJson(res); if (!res.ok) throw new Error(data.error || 'Failed to resolve targets'); return data;
   },
-  async createPublication(payload: { sourceScreenId: string; screenIds: string[]; groupIds: string[]; idempotencyKey: string }): Promise<PublishJob> {
+  async createPublication(payload: { sourceScreenId: string; screenIds: string[]; groupIds: string[]; idempotencyKey: string; playlistId?: string; layoutId?: string }): Promise<PublishJob> {
     const res = await fetch('/api/publications', { method: 'POST', headers: authHeaders(), body: JSON.stringify(payload) });
     const data = await readJson(res); if (!res.ok) throw new Error(data.error || 'Failed to publish'); return data;
   },
@@ -237,6 +238,27 @@ export const api = {
     const res = await fetch(`/api/publications/${jobId}/retry-failed`, { method: 'POST', headers: authHeaders() });
     const data = await readJson(res); if (!res.ok) throw new Error(data.error || 'Retry failed');
   },
+  async getContentPlaylists(): Promise<ContentPlaylist[]> { const r=await fetch('/api/content/playlists',{headers:authHeaders()});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d; },
+  async createContentPlaylist(payload:any): Promise<ContentPlaylist> { const r=await fetch('/api/content/playlists',{method:'POST',headers:authHeaders(),body:JSON.stringify(payload)});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d; },
+  async updateContentPlaylist(id:string,payload:any): Promise<ContentPlaylist> { const r=await fetch(`/api/content/playlists/${id}`,{method:'PATCH',headers:authHeaders(),body:JSON.stringify(payload)});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d; },
+  async saveContentPlaylistItems(id:string,items:any[]): Promise<any> { const r=await fetch(`/api/content/playlists/${id}/items`,{method:'PUT',headers:authHeaders(),body:JSON.stringify({items})});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d; },
+  async duplicateContentPlaylist(id:string): Promise<any> { const r=await fetch(`/api/content/playlists/${id}/duplicate`,{method:'POST',headers:authHeaders(),body:'{}'});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d; },
+  async deleteContentPlaylist(id:string): Promise<void> { const r=await fetch(`/api/content/playlists/${id}`,{method:'DELETE',headers:authHeaders()});const d=await readJson(r);if(!r.ok)throw new Error(d.error); },
+  async getLayouts(): Promise<ContentLayout[]> { const r=await fetch('/api/layouts',{headers:authHeaders()});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d; },
+  async createLayout(payload:any): Promise<ContentLayout> { const r=await fetch('/api/layouts',{method:'POST',headers:authHeaders(),body:JSON.stringify(payload)});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d; },
+  async updateLayout(id:string,payload:any): Promise<ContentLayout> { const r=await fetch(`/api/layouts/${id}`,{method:'PATCH',headers:authHeaders(),body:JSON.stringify(payload)});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d; },
+  async getSchedules(): Promise<ContentSchedule[]> { const r=await fetch('/api/schedules',{headers:authHeaders()});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d; },
+  async createSchedule(payload:any): Promise<ContentSchedule> { const r=await fetch('/api/schedules',{method:'POST',headers:authHeaders(),body:JSON.stringify(payload)});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d; },
+  async updateSchedule(id:string,payload:any): Promise<ContentSchedule> { const r=await fetch(`/api/schedules/${id}`,{method:'PATCH',headers:authHeaders(),body:JSON.stringify(payload)});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d; },
+  async deleteSchedule(id:string): Promise<void> { const r=await fetch(`/api/schedules/${id}`,{method:'DELETE',headers:authHeaders()});const d=await readJson(r);if(!r.ok)throw new Error(d.error); },
+  async getPlaybackSettings(screenId:string): Promise<any> { const r=await fetch(`/api/playback-settings?screenId=${encodeURIComponent(screenId)}`,{headers:authHeaders()});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d; },
+  async savePlaybackSettings(scope:string,scopeId:string,values:any): Promise<any> { const r=await fetch(`/api/playback-settings/${scope}/${scopeId}`,{method:'PUT',headers:authHeaders(),body:JSON.stringify({values})});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d; },
+  async getGeneralSettingsDraft(scope:string,scopeId:string):Promise<any>{const r=await fetch(`/api/general-settings/draft?scope=${encodeURIComponent(scope)}&scopeId=${encodeURIComponent(scopeId)}`,{headers:authHeaders()});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d;},
+  async saveGeneralSettingsDraft(scope:string,scopeId:string,overrides:Record<string,any>):Promise<any>{const r=await fetch('/api/general-settings/draft',{method:'PUT',headers:authHeaders(),body:JSON.stringify({scope,scopeId,overrides})});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d;},
+  async resetGeneralSettings(scope:string,scopeId:string):Promise<any>{const r=await fetch('/api/general-settings/reset',{method:'POST',headers:authHeaders(),body:JSON.stringify({scope,scopeId})});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d;},
+  async publishGeneralSettings(scope:string,scopeId:string):Promise<any>{const r=await fetch('/api/general-settings/publish',{method:'POST',headers:authHeaders(),body:JSON.stringify({scope,scopeId,idempotencyKey:crypto.randomUUID()})});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d;},
+  async assignPlaylist(screenId:string,playlistId:string|null):Promise<any>{const r=await fetch(`/api/screens/${screenId}/playlist-assignment`,{method:'PUT',headers:authHeaders(),body:JSON.stringify({playlistId})});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d;},
+  async publishAssignedPlaylist(screenId:string,playlistId:string):Promise<PublishJob>{return this.createPublication({sourceScreenId:screenId,screenIds:[screenId],groupIds:[],playlistId,idempotencyKey:crypto.randomUUID()});},
 
   async getAuditLogs(): Promise<AuditLog[]> {
     const res = await fetch('/api/audit', {

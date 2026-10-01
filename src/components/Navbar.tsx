@@ -69,6 +69,10 @@ export const Navbar: React.FC<NavbarProps> = ({
             Screens
           </button>
           <button
+            onClick={() => setActiveTab('playlists')}
+            className={`transition-colors hover:text-slate-900 pb-0.5 border-b-2 ${activeTab === 'playlists' ? 'border-sky-600 text-slate-900 font-semibold' : 'border-transparent'}`}
+          >Playlists</button>
+          <button
             onClick={() => setActiveTab('media')}
             className={`transition-colors hover:text-slate-900 pb-0.5 border-b-2 ${
               activeTab === 'media'
@@ -89,6 +93,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             Network & Logs
           </button>}
           {user.role === 'ADMIN' && <button onClick={() => setActiveTab('users')} className={`transition-colors hover:text-slate-900 pb-0.5 border-b-2 ${activeTab === 'users' ? 'border-sky-600 text-slate-900 font-semibold' : 'border-transparent'}`}>Users</button>}
+          {user.role === 'ADMIN' && <button onClick={() => setActiveTab('settings')} className={`transition-colors hover:text-slate-900 pb-0.5 border-b-2 ${activeTab === 'settings' ? 'border-sky-600 text-slate-900 font-semibold' : 'border-transparent'}`}>Settings</button>}
         </nav>
 
         {/* Zone 3: Actions & Profile */}

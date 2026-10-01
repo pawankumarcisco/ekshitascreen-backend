@@ -1,0 +1,10 @@
+CREATE TYPE "SettingsScope" AS ENUM ('COMMON', 'GROUP', 'SCREEN');
+CREATE TYPE "SettingsDeliveryStatus" AS ENUM ('PENDING', 'RECEIVED', 'APPLYING', 'APPLIED', 'FAILED');
+CREATE TABLE "GeneralSettingsDraft" ("id" TEXT PRIMARY KEY, "ownerId" TEXT NOT NULL, "scope" "SettingsScope" NOT NULL, "scopeId" TEXT NOT NULL, "overrides" JSONB NOT NULL, "updatedBy" TEXT NOT NULL, "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, "updatedAt" TIMESTAMP(3) NOT NULL);
+CREATE UNIQUE INDEX "GeneralSettingsDraft_ownerId_scope_scopeId_key" ON "GeneralSettingsDraft"("ownerId","scope","scopeId");
+CREATE TABLE "GeneralSettingsRevision" ("id" TEXT PRIMARY KEY, "ownerId" TEXT NOT NULL, "scope" "SettingsScope" NOT NULL, "scopeId" TEXT NOT NULL, "version" INTEGER NOT NULL, "overrides" JSONB NOT NULL, "actorId" TEXT NOT NULL, "publishedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE UNIQUE INDEX "GeneralSettingsRevision_ownerId_scope_scopeId_version_key" ON "GeneralSettingsRevision"("ownerId","scope","scopeId","version");
+CREATE TABLE "SettingsPublication" ("id" TEXT PRIMARY KEY, "ownerId" TEXT NOT NULL, "revisionId" TEXT NOT NULL, "idempotencyKey" TEXT NOT NULL, "actorId" TEXT NOT NULL, "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE UNIQUE INDEX "SettingsPublication_actorId_idempotencyKey_key" ON "SettingsPublication"("actorId","idempotencyKey");
+CREATE TABLE "DeviceSettingsState" ("id" TEXT PRIMARY KEY, "deviceId" TEXT NOT NULL, "publicationId" TEXT NOT NULL, "desiredVersion" INTEGER NOT NULL DEFAULT 0, "receivedVersion" INTEGER NOT NULL DEFAULT 0, "appliedVersion" INTEGER NOT NULL DEFAULT 0, "status" "SettingsDeliveryStatus" NOT NULL DEFAULT 'PENDING', "effectiveSettings" JSONB NOT NULL, "unsupportedCapabilities" JSONB NOT NULL, "errorCode" TEXT, "errorMessage" TEXT, "lastSeenAt" TIMESTAMP(3), "lastAppliedAt" TIMESTAMP(3), "updatedAt" TIMESTAMP(3) NOT NULL);
+CREATE UNIQUE INDEX "DeviceSettingsState_deviceId_key" ON "DeviceSettingsState"("deviceId");

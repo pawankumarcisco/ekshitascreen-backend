@@ -14,13 +14,16 @@ import {
   Image as ImageIcon,
   ArrowUp,
   ArrowDown
+  ,ListPlus
 } from 'lucide-react';
-import { PlaylistItem, MediaAsset, Playlist } from '../types';
+import { PlaylistItem, MediaAsset, Playlist, ContentPlaylist } from '../types';
+import { api } from '../services/api';
 
 interface PlaylistEditorProps {
   screenId: string;
   publishedPlaylist: Playlist | null;
   draftPlaylist: Playlist | null;
+  assignedPlaylist?: ContentPlaylist | null;
   mediaAssets: MediaAsset[];
   onSaveDraft: (items: any[]) => Promise<void>;
   onPublish: () => Promise<void>;
@@ -32,6 +35,7 @@ export const PlaylistEditor: React.FC<PlaylistEditorProps> = ({
   screenId,
   publishedPlaylist,
   draftPlaylist,
+  assignedPlaylist: initialAssignedPlaylist,
   mediaAssets,
   onSaveDraft,
   onPublish,
@@ -49,6 +53,10 @@ export const PlaylistEditor: React.FC<PlaylistEditorProps> = ({
   const [showAssetSelector, setShowAssetSelector] = useState(false);
   const [saving, setSaving] = useState(false);
   const [publishing, setPublishing] = useState(false);
+  const [showPlaylistSelector,setShowPlaylistSelector]=useState(false);
+  const [availablePlaylists,setAvailablePlaylists]=useState<ContentPlaylist[]>([]);
+  const [assignedPlaylistId,setAssignedPlaylistId]=useState('');
+  const [assignedPlaylist,setAssignedPlaylist]=useState<ContentPlaylist | null>(initialAssignedPlaylist || null);
   const [message, setMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
   // Sync state if props change and no local edits
@@ -58,6 +66,19 @@ export const PlaylistEditor: React.FC<PlaylistEditorProps> = ({
       setItems(srcItems.map((item, idx) => ({ ...item, sortOrder: idx + 1 })));
     }
   }, [draftPlaylist, publishedPlaylist, hasUnsavedChanges]);
+
+  React.useEffect(() => {
+    setAssignedPlaylist(initialAssignedPlaylist || null);
+    setAssignedPlaylistId(initialAssignedPlaylist?.id || '');
+  }, [initialAssignedPlaylist]);
+
+  React.useEffect(() => {
+    if (!showPlaylistSelector && message?.type === 'success' && (message.text.startsWith('Playlist assignment') || message.text.startsWith('Playlist published'))) {
+      setAssignedPlaylist(availablePlaylists.find(playlist => playlist.id === assignedPlaylistId) || null);
+    }
+  }, [showPlaylistSelector, message, availablePlaylists, assignedPlaylistId]);
+
+  const displayedItems = items.map((item, index) => ({ item, index, source: 'image' as const }));
 
   const handleDurationChange = (index: number, seconds: number) => {
     const updated = [...items];
@@ -186,6 +207,14 @@ export const PlaylistEditor: React.FC<PlaylistEditorProps> = ({
           </div>
 
           <button
+            onClick={async()=>{setAvailablePlaylists(await api.getContentPlaylists());setShowPlaylistSelector(true);}}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-sky-700 bg-white hover:bg-sky-50 rounded-lg transition-colors border border-sky-200"
+          >
+            <ListPlus className="w-3.5 h-3.5" />
+            <span>Assign Playlist</span>
+          </button>
+
+          <button
             onClick={() => setShowAssetSelector(true)}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-sky-700 bg-sky-50 hover:bg-sky-100 rounded-lg transition-colors border border-sky-200"
           >
@@ -229,7 +258,7 @@ export const PlaylistEditor: React.FC<PlaylistEditorProps> = ({
 
       {/* Playlist Items List */}
       <div className="p-6">
-        {items.length === 0 ? (
+        {displayedItems.length === 0 && !assignedPlaylist ? (
           <div className="border-2 border-dashed border-slate-200 rounded-xl p-8 text-center">
             <ImageIcon className="w-8 h-8 text-slate-300 mx-auto mb-2" />
             <p className="text-xs font-medium text-slate-700">Playlist is empty</p>
@@ -243,13 +272,29 @@ export const PlaylistEditor: React.FC<PlaylistEditorProps> = ({
           </div>
         ) : (
           <div className="space-y-2.5">
-            {items.map((item, index) => {
+            {assignedPlaylist && (
+              <div className="flex items-center justify-between p-4 rounded-lg border border-violet-200 bg-violet-50/50 shadow-2xs">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-16 h-12 rounded-md border border-violet-200 bg-white flex items-center justify-center">
+                    <ImageIcon className="w-6 h-6 text-violet-500" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-slate-900 truncate">{assignedPlaylist.name}</p>
+                    <p className="text-[11px] text-slate-500">
+                      Assigned playlist · {assignedPlaylist.imageCount ?? assignedPlaylist.items.length} images · {assignedPlaylist.totalDurationSeconds ?? 0} sec
+                    </p>
+                  </div>
+                </div>
+                <span className="rounded-full bg-violet-100 text-violet-700 px-2.5 py-1 text-[10px] font-semibold">Playlist</span>
+              </div>
+            )}
+            {displayedItems.map(({ item, index, source }, displayIndex) => {
               const asset = item.mediaAsset || mediaAssets.find(a => a.id === item.mediaAssetId);
               const previewUrl = asset?.thumbnailUrl || asset?.url || '/storage/media/' + asset?.storageKey;
 
               return (
                 <div
-                  key={item.id || index}
+                  key={`${source}-${item.id || displayIndex}`}
                   className={`flex items-center justify-between p-3 rounded-lg border transition-all ${
                     item.enabled
                       ? 'bg-white border-slate-200 shadow-2xs hover:border-slate-300'
@@ -305,9 +350,14 @@ export const PlaylistEditor: React.FC<PlaylistEditorProps> = ({
                       <p className="text-xs font-semibold text-slate-800 truncate max-w-xs md:max-w-sm">
                         {asset?.originalName || 'Signage Image'}
                       </p>
-                      <p className="text-[10px] text-slate-400 font-mono">
-                        {asset ? `${asset.width}×${asset.height} · ${(asset.fileSize / (1024 * 1024)).toFixed(1)} MB` : 'Media Asset'}
-                      </p>
+                      <div className="flex items-center gap-2">
+                        <p className="text-[10px] text-slate-400 font-mono">
+                          {asset ? `${asset.width}×${asset.height} · ${(asset.fileSize / (1024 * 1024)).toFixed(1)} MB` : 'Media Asset'}
+                        </p>
+                        <span className={`rounded-full px-2 py-0.5 text-[9px] font-semibold ${source === 'playlist' ? 'bg-violet-50 text-violet-700' : 'bg-sky-50 text-sky-700'}`}>
+                          {source === 'playlist' ? assignedPlaylist?.name || 'Assigned playlist' : 'Assigned image'}
+                        </span>
+                      </div>
                     </div>
                   </div>
 
@@ -321,14 +371,16 @@ export const PlaylistEditor: React.FC<PlaylistEditorProps> = ({
                         max={3600}
                         value={item.durationSeconds ?? 10}
                         onChange={(e) => handleDurationChange(index, parseInt(e.target.value) || 10)}
+                        disabled={source === 'playlist'}
                         className="w-10 bg-transparent font-mono font-semibold text-slate-900 text-center focus:outline-none"
                       />
                       <span className="text-slate-400 text-[11px]">sec</span>
                     </div>
 
                     <button
-                      onClick={() => handleToggleEnabled(index)}
-                      className={`p-1.5 rounded-md transition-colors ${
+                      onClick={() => source === 'image' && handleToggleEnabled(index)}
+                      disabled={source === 'playlist'}
+                      className={`p-1.5 rounded-md transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
                         item.enabled ? 'text-sky-600 hover:bg-sky-50' : 'text-slate-400 hover:bg-slate-100'
                       }`}
                       title={item.enabled ? 'Enabled' : 'Disabled'}
@@ -338,8 +390,9 @@ export const PlaylistEditor: React.FC<PlaylistEditorProps> = ({
 
                     <button
                       onClick={() => handleRemoveItem(index)}
-                      className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors"
-                      title="Remove from playlist"
+                      disabled={source === 'playlist'}
+                      className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+                      title={source === 'playlist' ? 'Edit this item in the assigned playlist' : 'Remove from playlist'}
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -419,6 +472,7 @@ export const PlaylistEditor: React.FC<PlaylistEditorProps> = ({
           </div>
         </div>
       )}
+      {showPlaylistSelector && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" onMouseDown={()=>setShowPlaylistSelector(false)}><div className="bg-white rounded-xl border border-sky-100 shadow-xl w-full max-w-lg p-5" onMouseDown={e=>e.stopPropagation()}><div className="flex justify-between"><div><h4 className="text-sm font-semibold">Assign Playlist</h4><p className="text-xs text-slate-500">Choose a reusable playlist for this screen.</p></div><button onClick={()=>setShowPlaylistSelector(false)}>×</button></div><select value={assignedPlaylistId} onChange={e=>setAssignedPlaylistId(e.target.value)} className="w-full mt-4 border border-sky-100 rounded px-3 py-2 text-sm"><option value="">Select playlist</option>{availablePlaylists.map(p=><option key={p.id} value={p.id}>{p.name} · {p.imageCount||p.items.length} images</option>)}</select>{assignedPlaylistId&&<div className="flex gap-2 mt-3 overflow-x-auto">{availablePlaylists.find(p=>p.id===assignedPlaylistId)?.items.filter(i=>i.enabled).map(i=><img key={i.id} src={i.mediaAsset?.thumbnailUrl||i.mediaAsset?.url} className="w-24 h-14 object-cover rounded border border-sky-100"/>)}</div>}<div className="flex justify-end gap-2 mt-4"><button onClick={async()=>{await api.assignPlaylist(screenId,assignedPlaylistId||null);setMessage({text:'Playlist assignment saved as draft.',type:'success'});setShowPlaylistSelector(false);}} className="border border-sky-200 text-sky-700 rounded px-3 py-2 text-xs">Save Draft</button><button disabled={!assignedPlaylistId} onClick={async()=>{try{await api.assignPlaylist(screenId,assignedPlaylistId);await api.publishAssignedPlaylist(screenId,assignedPlaylistId);setMessage({text:'Playlist published. Waiting for device acknowledgement.',type:'success'});setShowPlaylistSelector(false);}catch(error){setMessage({text:error instanceof Error?error.message:'Publish failed',type:'error'});}}} className="bg-sky-600 text-white rounded px-3 py-2 text-xs disabled:opacity-40">Publish</button></div></div></div>}
     </div>
   );
 };

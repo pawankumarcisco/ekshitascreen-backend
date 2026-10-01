@@ -4,6 +4,9 @@ import { ScreenList } from './components/ScreenList';
 import { GroupsPublishPanel } from './components/GroupsPublishPanel';
 import { ScreenDetail } from './components/ScreenDetail';
 import { MediaLibrary } from './components/MediaLibrary';
+import { PlaylistPageV2 } from './components/PlaylistPageV2';
+import { GeneralSettings } from './components/GeneralSettings';
+import { LandingPage } from './components/LandingPage';
 import { SystemNetwork } from './components/SystemNetwork';
 import { RegisterScreenModal } from './components/RegisterScreenModal';
 import { LoginPage } from './components/LoginPage';
@@ -16,7 +19,8 @@ import {
 } from 'lucide-react';
 
 export function App() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'screens' | 'media' | 'network' | 'users'>('dashboard');
+  const [path, setPath] = useState(window.location.pathname);
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'screens' | 'playlists' | 'media' | 'settings' | 'network' | 'users'>('dashboard');
   const [selectedScreenId, setSelectedScreenId] = useState<string | null>(null);
   const [isRegisterOpen, setIsRegisterOpen] = useState(false);
   const [registerInitialCode, setRegisterInitialCode] = useState('');
@@ -48,6 +52,17 @@ export function App() {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    document.title = 'EkshitaScreen — Smart Digital Signage';
+    let description=document.querySelector('meta[name="description"]') as HTMLMetaElement|null;
+    if(!description){description=document.createElement('meta');description.name='description';document.head.appendChild(description);}
+    description.content='Manage playlists, schedule content, and publish to Android screens with EkshitaScreen.';
+    const onPopState=()=>setPath(window.location.pathname);
+    window.addEventListener('popstate',onPopState);
+    return()=>window.removeEventListener('popstate',onPopState);
+  }, []);
+  const navigate=(next:string)=>{history.pushState({},'',next);setPath(next);window.scrollTo(0,0);};
 
   useEffect(() => {
     if (!user) return;
@@ -105,8 +120,10 @@ export function App() {
     return <div className="min-h-screen bg-slate-950" />;
   }
 
+  if (path === '/') return <LandingPage onLogin={() => navigate(user ? '/dashboard' : '/login')} />;
+
   if (!user) {
-    return <LoginPage onLogin={setUser} />;
+    return <LoginPage onLogin={loggedIn => { setUser(loggedIn); navigate('/dashboard'); }} />;
   }
 
   // Summary Metrics
@@ -258,6 +275,10 @@ export function App() {
             )}
           </div>
         )}
+
+        {/* MEDIA LIBRARY TAB */}
+        {activeTab === 'playlists' && <PlaylistPageV2 assets={mediaAssets} onMediaChanged={loadData} />}
+        {activeTab === 'settings' && user.role === 'ADMIN' && <GeneralSettings />}
 
         {/* MEDIA LIBRARY TAB */}
         {activeTab === 'media' && (

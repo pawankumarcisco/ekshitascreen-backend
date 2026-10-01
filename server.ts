@@ -72,6 +72,14 @@ interface DBState {
   publishTargets: any[];
   publishAttempts: any[];
   publishEvents: any[];
+  layouts: any[];
+  schedules: any[];
+  playbackSettings: any[];
+  cleanupRuns: any[];
+  generalSettingsDrafts: any[];
+  generalSettingsRevisions: any[];
+  settingsPublications: any[];
+  deviceSettings: any[];
 }
 
 function loadDB(): DBState {
@@ -123,6 +131,14 @@ function loadDB(): DBState {
     publishTargets: [],
     publishAttempts: [],
     publishEvents: []
+    ,layouts: []
+    ,schedules: []
+    ,playbackSettings: []
+    ,cleanupRuns: []
+    ,generalSettingsDrafts: []
+    ,generalSettingsRevisions: []
+    ,settingsPublications: []
+    ,deviceSettings: []
   };
 
   saveDB(initialDB);
@@ -153,7 +169,7 @@ let db = loadDB();
 function normalizeState(state: DBState): boolean {
   let changed = false;
   // Additive state migration for installations created before groups/publications.
-  for (const key of ['screenGroups', 'screenGroupMembers', 'publishJobs', 'publishTargets', 'publishAttempts', 'publishEvents'] as const) {
+  for (const key of ['screenGroups', 'screenGroupMembers', 'publishJobs', 'publishTargets', 'publishAttempts', 'publishEvents', 'layouts', 'schedules', 'playbackSettings', 'cleanupRuns', 'generalSettingsDrafts', 'generalSettingsRevisions', 'settingsPublications', 'deviceSettings'] as const) {
     if (!Array.isArray(state[key])) { state[key] = []; changed = true; }
   }
   return changed;
@@ -808,6 +824,13 @@ app.post('/api/screens/register', authMiddleware, adminMiddleware, (req: any, re
 
 const PUBLISH_STATES = ['QUEUED', 'DOWNLOADING', 'VERIFYING', 'READY', 'PLAYING', 'FAILED', 'SUPERSEDED'];
 const STATE_RANK: Record<string, number> = { QUEUED: 0, DOWNLOADING: 1, VERIFYING: 2, READY: 3, PLAYING: 4 };
+const MAX_CANVAS = 7680;
+const DEFAULT_PLAYBACK_SETTINGS: Record<string, any> = {
+  imageDurationSeconds: 10, transition: 'FADE', transitionDurationMs: 400, rotation: 0,
+  fitMode: 'FIT', loop: true, shuffle: false, videoMuted: false, volume: 100,
+  autoStart: true, syncIntervalSeconds: 30, cleanupGraceDays: 7, autoDeleteExpired: false,
+  idleMessage: 'No content is currently available.'
+};
 
 function visibleScreensFor(user: any) {
   return user.role === 'ADMIN' ? db.screens : db.screens.filter(s => s.userId === user.id);
@@ -843,9 +866,150 @@ function startAttempt(target: any, automatic = false) {
   return attempt;
 }
 
+function owns(user: any, value: any) { return user.role === 'ADMIN' || value.ownerId === user.id || value.userId === user.id; }
+function isoOrNull(value: any) {
+  if (value === null || value === undefined || value === '') return null;
+  const time = Date.parse(value); return Number.isFinite(time) ? new Date(time).toISOString() : undefined;
+}
+function validateValidity(body: any) {
+  const validFrom = isoOrNull(body.validFrom), expiresAt = isoOrNull(body.expiresAt);
+  if (validFrom === undefined || expiresAt === undefined) return { error: 'Validity timestamps must be valid ISO dates' };
+  if (validFrom && expiresAt && Date.parse(validFrom) >= Date.parse(expiresAt)) return { error: 'Expiry must be after valid-from' };
+  return { validFrom, expiresAt };
+}
+function validateLayout(input: any) {
+  const width = Number(input.width), height = Number(input.height);
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > MAX_CANVAS || height > MAX_CANVAS) return 'Canvas dimensions must be positive integers up to 7680px';
+  const zones = Array.isArray(input.zones) ? input.zones : [];
+  for (const z of zones) if ([z.x,z.y,z.width,z.height].some((v:any)=>!Number.isFinite(Number(v))) || z.x < 0 || z.y < 0 || z.width <= 0 || z.height <= 0 || z.x+z.width > 100 || z.y+z.height > 100) return 'Zone geometry must use positive normalized percentages inside the canvas';
+  for (let i=0;i<zones.length;i++) for (let j=i+1;j<zones.length;j++) { const a=zones[i],b=zones[j]; if(a.enabled!==false&&b.enabled!==false&&a.x<b.x+b.width&&a.x+a.width>b.x&&a.y<b.y+b.height&&a.y+a.height>b.y)return 'Overlapping zones are not supported'; }
+  if (zones.filter((z:any)=>z.enabled!==false&&z.containsVideo).length > 1) return 'This player supports at most one simultaneous video zone';
+  return null;
+}
+function resolveTargetIds(user: any, screenIds: string[] = [], groupIds: string[] = []) {
+  const allowed = new Set(visibleScreensFor(user).map(s => s.id)), ids = new Set(screenIds);
+  for (const member of db.screenGroupMembers) if (groupIds.includes(member.groupId)) ids.add(member.screenId);
+  return [...ids].filter(id => allowed.has(id));
+}
+function scheduleTimesOverlap(a:any,b:any){const daysA=new Set(a.weekdays||[]),daysB=new Set(b.weekdays||[]);if(![...daysA].some(d=>daysB.has(d)))return false;if(a.allDay||b.allDay)return true;const minute=(v:string)=>{const [h,m]=String(v).split(':').map(Number);return h*60+m;};const ranges=(s:any)=>{const start=minute(s.startTime),end=minute(s.endTime);return end>start?[[start,end]]:[[start,1440],[0,end]];};return ranges(a).some((x:number[])=>ranges(b).some((y:number[])=>x[0]<y[1]&&y[0]<x[1]));}
+
+// Reusable playlist library. Existing per-screen playlists remain compatible.
+app.get('/api/content/playlists', authMiddleware, (req:any,res:Response) => {
+  const now=Date.now();
+  res.json(db.playlists.filter(p => p.libraryPlaylist && owns(req.user,p) && !p.deletedAt).map(p => ({...p,
+    expiryState: p.expiresAt && Date.parse(p.expiresAt)<=now ? 'EXPIRED' : p.expiresAt && Date.parse(p.expiresAt)-now<7*86400000 ? 'EXPIRING_SOON' : 'ACTIVE',
+    items: db.playlistItems.filter(i=>i.playlistId===p.id).sort((a,b)=>a.sortOrder-b.sortOrder).map(i=>({...i,mediaAsset:db.mediaAssets.find(a=>a.id===i.mediaAssetId)})),
+    assignedScreens: db.screens.filter(s=>s.assignedPlaylistId===p.id).map(s=>({id:s.id,name:s.name})),
+    imageCount: db.playlistItems.filter(i=>i.playlistId===p.id).length,
+    totalDurationSeconds: db.playlistItems.filter(i=>i.playlistId===p.id&&i.enabled!==false).reduce((sum,i)=>sum+Number(i.durationSeconds||10),0)
+  })));
+});
+app.post('/api/content/playlists', authMiddleware, (req:any,res:Response) => {
+  if(req.user.role==='VIEWER') return res.status(403).json({error:'Manage playlist permission required'});
+  const validity=validateValidity(req.body); if(validity.error) return res.status(400).json({error:validity.error});
+  const name=String(req.body.name||'').trim(); if(!name) return res.status(400).json({error:'Playlist name is required'});
+  const now=new Date().toISOString(); const playlist={id:'playlist-'+crypto.randomUUID(),libraryPlaylist:true,ownerId:req.user.id,name,description:String(req.body.description||''),status:'DRAFT',version:1,loop:req.body.loop??null,shuffle:req.body.shuffle??null,...validity,autoDelete:Boolean(req.body.autoDelete),createdBy:req.user.id,createdAt:now,updatedAt:now};
+  db.playlists.push(playlist); saveDB(db); logAudit(req.user.id,null,'CONTENT_PLAYLIST_CREATED',{playlistId:playlist.id}); res.status(201).json(playlist);
+});
+app.patch('/api/content/playlists/:id', authMiddleware, (req:any,res:Response) => {
+  const p=db.playlists.find(x=>x.id===req.params.id&&x.libraryPlaylist); if(!p) return res.status(404).json({error:'Playlist not found'}); if(!owns(req.user,p)) return res.status(403).json({error:'Access denied'});
+  const validity=validateValidity({...p,...req.body}); if(validity.error) return res.status(400).json({error:validity.error});
+  for(const key of ['name','description','loop','shuffle','autoDelete','status']) if(req.body[key]!==undefined) p[key]=req.body[key];
+  Object.assign(p,validity,{updatedAt:new Date().toISOString()}); saveDB(db); logAudit(req.user.id,null,'CONTENT_PLAYLIST_UPDATED',{playlistId:p.id}); res.json(p);
+});
+app.put('/api/content/playlists/:id/items', authMiddleware, (req:any,res:Response) => {
+  const p=db.playlists.find(x=>x.id===req.params.id&&x.libraryPlaylist); if(!p||!owns(req.user,p)) return res.status(403).json({error:'Access denied'});
+  const items=Array.isArray(req.body.items)?req.body.items:[];
+  for(const item of items){const asset=db.mediaAssets.find(a=>a.id===item.mediaAssetId);if(!asset||!owns(req.user,asset)) return res.status(400).json({error:'Playlist contains unavailable media'});const duration=item.durationSeconds==null?null:Number(item.durationSeconds);if(duration!==null&&(!Number.isInteger(duration)||duration<1||duration>86400))return res.status(400).json({error:'Duration must be 1-86400 seconds'});const v=validateValidity(item);if(v.error)return res.status(400).json({error:v.error});}
+  db.playlistItems=db.playlistItems.filter(i=>i.playlistId!==p.id);items.forEach((i:any,index:number)=>{const v=validateValidity(i);db.playlistItems.push({id:'pli-'+crypto.randomUUID(),playlistId:p.id,mediaAssetId:i.mediaAssetId,sortOrder:index+1,durationSeconds:i.durationSeconds??null,enabled:i.enabled!==false,...v});});p.version++;p.updatedAt=new Date().toISOString();saveDB(db);res.json(p);
+});
+app.post('/api/content/playlists/:id/duplicate', authMiddleware, (req:any,res:Response) => {
+  const source=db.playlists.find(p=>p.id===req.params.id&&p.libraryPlaylist);if(!source||!owns(req.user,source))return res.status(403).json({error:'Access denied'});const now=new Date().toISOString();const copy={...source,id:'playlist-'+crypto.randomUUID(),name:String(req.body.name||source.name+' Copy'),version:1,status:'DRAFT',createdAt:now,updatedAt:now};db.playlists.push(copy);db.playlistItems.filter(i=>i.playlistId===source.id).forEach(i=>db.playlistItems.push({...i,id:'pli-'+crypto.randomUUID(),playlistId:copy.id}));saveDB(db);res.status(201).json(copy);
+});
+app.delete('/api/content/playlists/:id', authMiddleware, (req:any,res:Response) => {
+  const p=db.playlists.find(x=>x.id===req.params.id&&x.libraryPlaylist);if(!p||!owns(req.user,p))return res.status(403).json({error:'Access denied'});const assigned=db.screens.filter(s=>s.assignedPlaylistId===p.id);if(assigned.length)return res.status(409).json({error:'Playlist is assigned to '+assigned.map(s=>s.name).join(', ')+'. Replace or unassign it first.'});p.deletedAt=new Date().toISOString();p.status='ARCHIVED';saveDB(db);res.json({message:'Playlist deleted; shared media and publication history preserved'});
+});
+
 // -------------------------------------------------------------
 // 5. SCREEN GROUPS
 // -------------------------------------------------------------
+app.get('/api/layouts',authMiddleware,(req:any,res:Response)=>res.json(db.layouts.filter(l=>owns(req.user,l)&&!l.deletedAt)));
+app.post('/api/layouts',authMiddleware,(req:any,res:Response)=>{const error=validateLayout(req.body);if(error)return res.status(400).json({error});const now=new Date().toISOString();const layout={id:'layout-'+crypto.randomUUID(),ownerId:req.user.id,name:String(req.body.name||'Untitled Layout'),description:String(req.body.description||''),width:Number(req.body.width),height:Number(req.body.height),orientation:req.body.orientation==='PORTRAIT'?'PORTRAIT':'LANDSCAPE',backgroundColor:req.body.backgroundColor||'#000000',template:req.body.template||'FULL_SCREEN',zones:req.body.zones||[],version:1,createdAt:now,updatedAt:now};db.layouts.push(layout);saveDB(db);res.status(201).json(layout);});
+app.patch('/api/layouts/:id',authMiddleware,(req:any,res:Response)=>{const l=db.layouts.find(x=>x.id===req.params.id&&!x.deletedAt);if(!l||!owns(req.user,l))return res.status(403).json({error:'Access denied'});const next={...l,...req.body};const error=validateLayout(next);if(error)return res.status(400).json({error});Object.assign(l,next,{version:l.version+1,updatedAt:new Date().toISOString()});saveDB(db);logAudit(req.user.id,null,'LAYOUT_UPDATED',{layoutId:l.id,version:l.version});res.json(l);});
+app.delete('/api/layouts/:id',authMiddleware,(req:any,res:Response)=>{const l=db.layouts.find(x=>x.id===req.params.id);if(!l||!owns(req.user,l))return res.status(403).json({error:'Access denied'});l.deletedAt=new Date().toISOString();saveDB(db);res.json({message:'Layout archived'});});
+
+app.get('/api/playback-settings',authMiddleware,(req:any,res:Response)=>{const global=db.playbackSettings.find(s=>s.scope==='GLOBAL')?.values||{};const screenId=String(req.query.screenId||'');const screen=db.screens.find(s=>s.id===screenId);const group=screen?.settingsGroupId?db.playbackSettings.find(s=>s.scope==='GROUP'&&s.scopeId===screen.settingsGroupId)?.values||{}:{};const override=screen?db.playbackSettings.find(s=>s.scope==='SCREEN'&&s.scopeId===screen.id)?.values||{}:{};const effective:any={};for(const key of Object.keys(DEFAULT_PLAYBACK_SETTINGS)){if(Object.prototype.hasOwnProperty.call(override,key)&&override[key]!==null)effective[key]={value:override[key],source:'SCREEN'};else if(Object.prototype.hasOwnProperty.call(group,key)&&group[key]!==null)effective[key]={value:group[key],source:'GROUP'};else if(Object.prototype.hasOwnProperty.call(global,key)&&global[key]!==null)effective[key]={value:global[key],source:'GLOBAL'};else effective[key]={value:DEFAULT_PLAYBACK_SETTINGS[key],source:'GLOBAL'};}res.json({global,group,screen:override,effective});});
+app.put('/api/playback-settings/:scope/:scopeId',authMiddleware,(req:any,res:Response)=>{if(req.user.role==='VIEWER')return res.status(403).json({error:'Settings permission required'});const scope=String(req.params.scope).toUpperCase();if(!['GLOBAL','GROUP','SCREEN'].includes(scope))return res.status(400).json({error:'Invalid settings scope'});const v=req.body.values||{};if(v.imageDurationSeconds!=null&&(v.imageDurationSeconds<1||v.imageDurationSeconds>86400))return res.status(400).json({error:'Invalid image duration'});if(v.volume!=null&&(v.volume<0||v.volume>100))return res.status(400).json({error:'Volume must be 0-100'});let record=db.playbackSettings.find(s=>s.scope===scope&&s.scopeId===req.params.scopeId);if(!record){record={id:'settings-'+crypto.randomUUID(),ownerId:req.user.id,scope,scopeId:req.params.scopeId,values:{},createdAt:new Date().toISOString()};db.playbackSettings.push(record);}record.values=v;record.updatedAt=new Date().toISOString();saveDB(db);logAudit(req.user.id,null,'PLAYBACK_SETTINGS_UPDATED',{scope,scopeId:record.scopeId});res.json(record);});
+
+const GENERAL_SETTINGS_DEFAULTS: Record<string, any> = {
+  resolutionWidth: 1920, resolutionHeight: 1080, orientation: 'LANDSCAPE', contentRotation: 0,
+  imageFit: 'CONTAIN', backgroundColor: '#000000', keepScreenAwake: true,
+  defaultSlideDurationSeconds: 10, transition: 'FADE', transitionDurationMs: 500,
+  playbackOrder: 'PLAYLIST_ORDER', repeatPlaylist: true, fallbackPlaylistId: null,
+  updateCheckIntervalSeconds: 60, offlinePlayback: true, downloadConnection: 'ANY', startOnBoot: true,
+  scheduleTimezone: 'Asia/Kolkata', excludeExpiredContent: true, deleteExpiredLocalFiles: true,
+  localDeletionGraceHours: 24
+};
+const GENERAL_SETTINGS_KEYS = new Set(Object.keys(GENERAL_SETTINGS_DEFAULTS));
+function settingsScope(value:any){return ['COMMON','GROUP','SCREEN'].includes(String(value).toUpperCase())?String(value).toUpperCase():null;}
+function validateGeneralSettings(values:any, user:any){
+  if(!values||typeof values!=='object'||Array.isArray(values))return 'Settings must be an object';
+  if(Object.keys(values).some(key=>!GENERAL_SETTINGS_KEYS.has(key)))return 'Unknown general setting';
+  const merged={...GENERAL_SETTINGS_DEFAULTS,...values};
+  if(!Number.isInteger(merged.resolutionWidth)||!Number.isInteger(merged.resolutionHeight)||merged.resolutionWidth<320||merged.resolutionHeight<240||merged.resolutionWidth>MAX_CANVAS||merged.resolutionHeight>MAX_CANVAS)return 'Canvas dimensions must be integers between 320×240 and 7680×7680';
+  if(!['LANDSCAPE','PORTRAIT'].includes(merged.orientation))return 'Invalid orientation';
+  if(![0,90,180,270].includes(merged.contentRotation))return 'Invalid content rotation';
+  if(!['CONTAIN','COVER','STRETCH'].includes(merged.imageFit))return 'Invalid image fit';
+  if(!/^#[0-9A-Fa-f]{6}$/.test(merged.backgroundColor))return 'Background colour must use #RRGGBB';
+  if(!Number.isInteger(merged.defaultSlideDurationSeconds)||merged.defaultSlideDurationSeconds<1||merged.defaultSlideDurationSeconds>3600)return 'Slide duration must be 1–3600 seconds';
+  if(!['NONE','FADE','SLIDE'].includes(merged.transition))return 'Invalid transition';
+  if(!Number.isInteger(merged.transitionDurationMs)||merged.transitionDurationMs<0||merged.transitionDurationMs>5000)return 'Transition duration must be 0–5000 milliseconds';
+  if(merged.transitionDurationMs>=merged.defaultSlideDurationSeconds*1000)return 'Transition duration must be shorter than slide duration';
+  if(!['PLAYLIST_ORDER','SHUFFLE'].includes(merged.playbackOrder))return 'Invalid playback order';
+  if(!Number.isInteger(merged.updateCheckIntervalSeconds)||merged.updateCheckIntervalSeconds<15||merged.updateCheckIntervalSeconds>3600)return 'Update interval must be 15–3600 seconds';
+  if(!['ANY','WIFI_ONLY'].includes(merged.downloadConnection))return 'Invalid download connection';
+  if(!Number.isInteger(merged.localDeletionGraceHours)||merged.localDeletionGraceHours<0||merged.localDeletionGraceHours>8760)return 'Deletion grace period must be 0–8760 hours';
+  try{new Intl.DateTimeFormat('en-US',{timeZone:merged.scheduleTimezone}).format();}catch{return 'Invalid IANA timezone';}
+  if(merged.fallbackPlaylistId){const p=db.playlists.find(p=>p.id===merged.fallbackPlaylistId&&p.libraryPlaylist&&!p.deletedAt&&owns(user,p));if(!p||!db.playlistItems.some(i=>i.playlistId===p.id&&i.enabled!==false))return 'Fallback playlist must be an accessible, playable playlist';}
+  return null;
+}
+function publishedOverrides(scope:string,scopeId:string){return db.generalSettingsRevisions.filter(r=>r.scope===scope&&r.scopeId===scopeId).sort((a,b)=>b.version-a.version)[0]?.overrides||{};}
+function effectiveGeneralSettings(screen:any){
+  const sources:any={};const effective:any={};
+  for(const key of Object.keys(GENERAL_SETTINGS_DEFAULTS)){effective[key]=GENERAL_SETTINGS_DEFAULTS[key];sources[key]='DEFAULT';}
+  const layers=[['COMMON','common'],screen.settingsGroupId?['GROUP',screen.settingsGroupId]:null,['SCREEN',screen.id]].filter(Boolean) as string[][];
+  for(const [scope,scopeId] of layers){const overrides=publishedOverrides(scope,scopeId);for(const key of Object.keys(overrides)){if(GENERAL_SETTINGS_KEYS.has(key)){effective[key]=overrides[key];sources[key]=scope;}}}
+  return {values:effective,sources};
+}
+function assertSettingsScopeAccess(req:any,res:Response,scope:string,scopeId:string){
+  if(scope==='COMMON')return true;
+  if(scope==='SCREEN'){const screen=db.screens.find(s=>s.id===scopeId);if(!screen||!canAccessScreen(req.user,screen)){res.status(403).json({error:'Access denied'});return false;}return true;}
+  const group=db.screenGroups.find(g=>g.id===scopeId);if(!group||(req.user.role!=='ADMIN'&&group.ownerId!==req.user.id)){res.status(403).json({error:'Access denied'});return false;}return true;
+}
+app.get('/api/general-settings/draft',authMiddleware,(req:any,res:Response)=>{const scope=settingsScope(req.query.scope),scopeId=scope==='COMMON'?'common':String(req.query.scopeId||'');if(!scope||!scopeId)return res.status(400).json({error:'Valid scope and scopeId are required'});if(!assertSettingsScopeAccess(req,res,scope,scopeId))return;const draft=db.generalSettingsDrafts.find(d=>d.scope===scope&&d.scopeId===scopeId);const screen=scope==='SCREEN'?db.screens.find(s=>s.id===scopeId):null;const effective=screen?effectiveGeneralSettings(screen):{values:{...GENERAL_SETTINGS_DEFAULTS,...publishedOverrides('COMMON','common'),...(scope==='GROUP'?publishedOverrides('GROUP',scopeId):{})},sources:{}};const last=db.generalSettingsRevisions.filter(r=>r.scope===scope&&r.scopeId===scopeId).sort((a,b)=>b.version-a.version)[0]||null;res.json({scope,scopeId,overrides:draft?.overrides??publishedOverrides(scope,scopeId),effective,lastPublished:last?{version:last.version,publishedAt:last.publishedAt}:null});});
+app.put('/api/general-settings/draft',authMiddleware,(req:any,res:Response)=>{if(req.user.role==='VIEWER')return res.status(403).json({error:'Settings permission required'});const scope=settingsScope(req.body.scope),scopeId=scope==='COMMON'?'common':String(req.body.scopeId||''),overrides=req.body.overrides||{};if(!scope||!scopeId)return res.status(400).json({error:'Valid scope and scopeId are required'});if(!assertSettingsScopeAccess(req,res,scope,scopeId))return;const error=validateGeneralSettings(overrides,req.user);if(error)return res.status(400).json({error});let draft=db.generalSettingsDrafts.find(d=>d.scope===scope&&d.scopeId===scopeId);const now=new Date().toISOString();if(draft)Object.assign(draft,{overrides,updatedAt:now,updatedBy:req.user.id});else{draft={id:'gsd-'+crypto.randomUUID(),scope,scopeId,overrides,createdAt:now,updatedAt:now,updatedBy:req.user.id};db.generalSettingsDrafts.push(draft);}saveDB(db);logAudit(req.user.id,null,'GENERAL_SETTINGS_DRAFT_SAVED',{scope,scopeId,overrides});res.json(draft);});
+app.post('/api/general-settings/validate',authMiddleware,(req:any,res:Response)=>{const error=validateGeneralSettings(req.body.overrides||{},req.user);res.status(error?400:200).json(error?{valid:false,error}:{valid:true});});
+app.post('/api/general-settings/reset',authMiddleware,(req:any,res:Response)=>{if(req.user.role==='VIEWER')return res.status(403).json({error:'Settings permission required'});const scope=settingsScope(req.body.scope),scopeId=scope==='COMMON'?'common':String(req.body.scopeId||'');if(!scope||!scopeId||scope==='COMMON')return res.status(400).json({error:'Reset is available for group and screen overrides'});if(!assertSettingsScopeAccess(req,res,scope,scopeId))return;let draft=db.generalSettingsDrafts.find(d=>d.scope===scope&&d.scopeId===scopeId);const now=new Date().toISOString();if(draft)Object.assign(draft,{overrides:{},updatedAt:now,updatedBy:req.user.id});else db.generalSettingsDrafts.push({id:'gsd-'+crypto.randomUUID(),scope,scopeId,overrides:{},createdAt:now,updatedAt:now,updatedBy:req.user.id});saveDB(db);res.json({overrides:{},requiresPublish:true});});
+app.post('/api/general-settings/publish',authMiddleware,(req:any,res:Response)=>{if(req.user.role==='VIEWER')return res.status(403).json({error:'Publish permission required'});const scope=settingsScope(req.body.scope),scopeId=scope==='COMMON'?'common':String(req.body.scopeId||''),key=String(req.body.idempotencyKey||'');if(!scope||!scopeId||!key)return res.status(400).json({error:'Scope, scopeId and idempotencyKey are required'});if(!assertSettingsScopeAccess(req,res,scope,scopeId))return;const duplicate=db.settingsPublications.find(p=>p.actorId===req.user.id&&p.idempotencyKey===key);if(duplicate)return res.json(duplicate);const draft=db.generalSettingsDrafts.find(d=>d.scope===scope&&d.scopeId===scopeId);if(!draft)return res.status(400).json({error:'Save a settings draft before publishing'});const error=validateGeneralSettings(draft.overrides,req.user);if(error)return res.status(400).json({error});const now=new Date().toISOString(),version=Math.max(0,...db.generalSettingsRevisions.filter(r=>r.scope===scope&&r.scopeId===scopeId).map(r=>r.version))+1;const revision={id:'gsr-'+crypto.randomUUID(),scope,scopeId,version,overrides:structuredClone(draft.overrides),actorId:req.user.id,publishedAt:now};db.generalSettingsRevisions.push(revision);let screens=visibleScreensFor(req.user);if(scope==='SCREEN')screens=screens.filter(s=>s.id===scopeId);if(scope==='GROUP'){const memberIds=new Set(db.screenGroupMembers.filter(m=>m.groupId===scopeId).map(m=>m.screenId));screens=screens.filter(s=>memberIds.has(s.id));for(const screen of screens)screen.settingsGroupId=scopeId;}const publication:any={id:'gsp-'+crypto.randomUUID(),idempotencyKey:key,actorId:req.user.id,scope,scopeId,revisionId:revision.id,createdAt:now,targets:[]};for(const screen of screens){const current=db.deviceSettings.find(s=>s.deviceId===screen.deviceId);const desiredVersion=(current?.desiredVersion||0)+1;const effective=effectiveGeneralSettings(screen);const target={screenId:screen.id,deviceId:screen.deviceId,desiredVersion,status:'PENDING',receivedVersion:current?.receivedVersion||0,appliedVersion:current?.appliedVersion||0,lastSeenAt:current?.lastSeenAt||null,lastAppliedAt:current?.lastAppliedAt||null,errorCode:null,errorMessage:null,unsupportedCapabilities:current?.unsupportedCapabilities||[]};if(current)Object.assign(current,{...target,effective,publicationId:publication.id});else db.deviceSettings.push({...target,effective,publicationId:publication.id});publication.targets.push(target);notifyDevice(screen.deviceId,'SETTINGS_UPDATE_AVAILABLE',{desiredVersion});}db.settingsPublications.push(publication);saveDB(db);logAudit(req.user.id,null,'GENERAL_SETTINGS_PUBLISHED',{scope,scopeId,revisionId:revision.id,targetCount:screens.length,overrides:revision.overrides});broadcastEvent('GENERAL_SETTINGS_PUBLISHED',{publicationId:publication.id});res.status(201).json(publication);});
+app.get('/api/general-settings/publications/:id',authMiddleware,(req:any,res:Response)=>{const publication=db.settingsPublications.find(p=>p.id===req.params.id);if(!publication)return res.status(404).json({error:'Publication not found'});publication.targets=publication.targets.map((target:any)=>{const state=db.deviceSettings.find(s=>s.deviceId===target.deviceId&&s.publicationId===publication.id);return state?{...target,...state}:target;});res.json(publication);});
+app.get('/api/screens/:id/effective-settings',authMiddleware,(req:any,res:Response)=>{const screen=db.screens.find(s=>s.id===req.params.id);if(!screen||!canAccessScreen(req.user,screen))return res.status(403).json({error:'Access denied'});res.json({...effectiveGeneralSettings(screen),delivery:db.deviceSettings.find(s=>s.deviceId===screen.deviceId)||null});});
+app.get('/api/device/configuration',deviceAuthMiddleware,(req:any,res:Response)=>{const state=db.deviceSettings.find(s=>s.deviceId===req.device.deviceId);if(!state)return res.status(204).end();const requested=Number(req.query.afterVersion||0);res.setHeader('ETag',`"settings-${state.desiredVersion}"`);if(requested>=state.desiredVersion||req.headers['if-none-match']===`"settings-${state.desiredVersion}"`)return res.status(304).end();res.json({version:state.desiredVersion,settings:state.effective.values,sources:state.effective.sources,publishedAt:db.settingsPublications.find(p=>p.id===state.publicationId)?.createdAt});});
+app.post('/api/device/configuration/received',deviceAuthMiddleware,(req:any,res:Response)=>{const state=db.deviceSettings.find(s=>s.deviceId===req.device.deviceId);const version=Number(req.body.version);if(!state)return res.status(404).json({error:'No settings publication'});if(version<state.desiredVersion)return res.json({status:'ignored_stale',desiredVersion:state.desiredVersion});if(version!==state.desiredVersion)return res.status(409).json({error:'Version does not match desired configuration'});state.receivedVersion=Math.max(state.receivedVersion||0,version);state.status='RECEIVED';state.lastSeenAt=new Date().toISOString();saveDB(db);res.json({status:'ok'});});
+app.post('/api/device/configuration/acknowledge',deviceAuthMiddleware,(req:any,res:Response)=>{const state=db.deviceSettings.find(s=>s.deviceId===req.device.deviceId),version=Number(req.body.version);if(!state)return res.status(404).json({error:'No settings publication'});if(version<state.desiredVersion)return res.json({status:'ignored_stale',desiredVersion:state.desiredVersion});if(version!==state.desiredVersion)return res.status(409).json({error:'Version does not match desired configuration'});const applied=req.body.status==='APPLIED',now=new Date().toISOString();Object.assign(state,{receivedVersion:Math.max(state.receivedVersion||0,version),appliedVersion:applied?version:state.appliedVersion,status:applied?'APPLIED':'FAILED',lastSeenAt:now,lastAppliedAt:applied?now:state.lastAppliedAt,errorCode:applied?null:String(req.body.errorCode||'APPLY_FAILED'),errorMessage:applied?null:String(req.body.errorMessage||'Configuration could not be applied'),unsupportedCapabilities:Array.isArray(req.body.unsupportedCapabilities)?req.body.unsupportedCapabilities:[]});saveDB(db);broadcastEvent('GENERAL_SETTINGS_DEVICE_STATUS',{deviceId:req.device.deviceId,version,status:state.status});res.json({status:'ok'});});
+
+app.get('/api/schedules',authMiddleware,(req:any,res:Response)=>res.json(db.schedules.filter(s=>owns(req.user,s)&&!s.deletedAt)));
+app.post('/api/schedules',authMiddleware,(req:any,res:Response)=>{const targetScreenIds=resolveTargetIds(req.user,req.body.screenIds||[],req.body.groupIds||[]);if(!targetScreenIds.length)return res.status(400).json({error:'A schedule requires at least one authorized target'});if(!req.body.allDay&&req.body.startTime===req.body.endTime)return res.status(400).json({error:'Equal start/end requires explicit All Day'});const candidate={...req.body,targetScreenIds,priority:Number(req.body.priority||0),weekdays:req.body.weekdays||[],timezone:String(req.body.timezone||'UTC')};const conflict=db.schedules.find(s=>!s.deletedAt&&s.enabled!==false&&s.priority===candidate.priority&&s.targetScreenIds.some((id:string)=>targetScreenIds.includes(id))&&scheduleTimesOverlap(s,candidate));if(conflict)return res.status(409).json({error:'Equal-priority target conflict with '+conflict.name});const now=new Date().toISOString();const schedule={id:'schedule-'+crypto.randomUUID(),ownerId:req.user.id,name:String(req.body.name||'Untitled Schedule'),playlistId:req.body.playlistId,layoutId:req.body.layoutId||null,screenIds:req.body.screenIds||[],groupIds:req.body.groupIds||[],targetScreenIds,startDate:req.body.startDate,endDate:req.body.endDate||null,weekdays:candidate.weekdays,startTime:req.body.startTime||'00:00',endTime:req.body.endTime||'00:00',allDay:Boolean(req.body.allDay),timezone:candidate.timezone,priority:candidate.priority,enabled:req.body.enabled!==false,createdAt:now,updatedAt:now};db.schedules.push(schedule);saveDB(db);logAudit(req.user.id,null,'SCHEDULE_CREATED',{scheduleId:schedule.id,targetScreenIds});res.status(201).json(schedule);});
+app.patch('/api/schedules/:id',authMiddleware,(req:any,res:Response)=>{const s=db.schedules.find(x=>x.id===req.params.id&&!x.deletedAt);if(!s||!owns(req.user,s))return res.status(403).json({error:'Access denied'});Object.assign(s,req.body,{updatedAt:new Date().toISOString()});s.targetScreenIds=resolveTargetIds(req.user,s.screenIds||[],s.groupIds||[]);saveDB(db);logAudit(req.user.id,null,'SCHEDULE_UPDATED',{scheduleId:s.id});res.json(s);});
+app.delete('/api/schedules/:id',authMiddleware,(req:any,res:Response)=>{const s=db.schedules.find(x=>x.id===req.params.id);if(!s||!owns(req.user,s))return res.status(403).json({error:'Access denied'});s.deletedAt=new Date().toISOString();saveDB(db);res.json({message:'Schedule deleted'});});
+
+function cleanupCandidates(){const now=Date.now(),retained=new Set<string>();db.publishTargets.forEach(t=>(t.manifestSnapshot||[]).forEach((i:any)=>retained.add(i.assetId)));db.playlistItems.forEach(i=>{const p=db.playlists.find(x=>x.id===i.playlistId);if(p&&!p.deletedAt)retained.add(i.mediaAssetId);});db.schedules.filter(s=>!s.deletedAt).forEach(s=>db.playlistItems.filter(i=>i.playlistId===s.playlistId).forEach(i=>retained.add(i.mediaAssetId)));return {retained,eligible:db.mediaAssets.filter(a=>a.autoDelete&&a.expiresAt&&Date.parse(a.expiresAt)+(Number(a.cleanupGraceDays??7)*86400000)<=now&&!retained.has(a.id)&&!a.deletedAt)};}
+let cleanupRunning=false;
+async function runCleanup(userId:string|null){if(cleanupRunning)return null;cleanupRunning=true;const {eligible}=cleanupCandidates(),run:any={id:'cleanup-'+crypto.randomUUID(),status:'RUNNING',eligibleIds:eligible.map(a=>a.id),deletedIds:[],errors:[],startedAt:new Date().toISOString(),completedAt:null};db.cleanupRuns.unshift(run);saveDB(db);try{for(const asset of eligible){try{if(asset.imageKitFileId&&imageKit)await imageKit.files.delete(asset.imageKitFileId);else{const root=path.resolve(MEDIA_DIR)+path.sep,thumbRoot=path.resolve(THUMBNAILS_DIR)+path.sep,file=path.resolve(MEDIA_DIR,asset.storageKey),thumb=path.resolve(THUMBNAILS_DIR,asset.storageKey);if(!file.startsWith(root)||!thumb.startsWith(thumbRoot))throw new Error('Unsafe storage path');if(fs.existsSync(file))fs.unlinkSync(file);if(fs.existsSync(thumb))fs.unlinkSync(thumb);}asset.deletedAt=new Date().toISOString();run.deletedIds.push(asset.id);}catch(error){run.errors.push({assetId:asset.id,message:error instanceof Error?error.message:'Cleanup failed'});}}run.status=run.errors.length?'PARTIAL':'COMPLETED';run.completedAt=new Date().toISOString();saveDB(db);logAudit(userId,null,'EXPIRY_CLEANUP_COMPLETED',{runId:run.id,deletedIds:run.deletedIds,errorCount:run.errors.length});return run;}finally{cleanupRunning=false;}}
+app.get('/api/cleanup/preview',authMiddleware,adminMiddleware,(_req:any,res:Response)=>{const {eligible,retained}=cleanupCandidates();res.json({eligible,retainedCount:retained.size});});
+app.get('/api/cleanup/history',authMiddleware,adminMiddleware,(_req:any,res:Response)=>res.json(db.cleanupRuns.slice(0,100)));
+app.post('/api/cleanup/run',authMiddleware,adminMiddleware,async(req:any,res:Response)=>{const run=await runCleanup(req.user.id);if(!run)return res.status(409).json({error:'Cleanup already running'});res.json(run);});
+setInterval(()=>runCleanup(null).catch(error=>console.error('[Cleanup]',error)),6*60*60*1000).unref();
+
 app.get('/api/screen-groups', authMiddleware, (req: any, res: Response) => {
   const allowed = new Set(visibleScreensFor(req.user).map(s => s.id));
   const now = Date.now();
@@ -919,13 +1083,16 @@ app.post('/api/publications', authMiddleware, (req: any, res: Response) => {
   if (req.user.role === 'VIEWER') return res.status(403).json({ error: 'Publish permission required' });
   const idempotencyKey = String(req.body.idempotencyKey || req.headers['idempotency-key'] || '').trim();
   if (!idempotencyKey) return res.status(400).json({ error: 'A client-generated idempotencyKey is required' });
-  const existing = db.publishJobs.find(j => j.ownerId === req.user.id && j.idempotencyKey === idempotencyKey);
+  const existing = db.publishJobs.find(j => j.publisherId === req.user.id && j.idempotencyKey === idempotencyKey);
   if (existing) return res.json(enrichJob(existing));
   const sourceScreen = db.screens.find(s => s.id === req.body.sourceScreenId);
   if (!sourceScreen || !canAccessScreen(req.user, sourceScreen)) return res.status(403).json({ error: 'Unauthorized source screen' });
-  const draft = db.playlists.find(p => p.screenId === sourceScreen.id && p.status === 'DRAFT');
+  const draft = req.body.playlistId
+    ? db.playlists.find(p => p.id === req.body.playlistId && p.libraryPlaylist && owns(req.user, p) && !p.deletedAt)
+    : db.playlists.find(p => p.screenId === sourceScreen.id && p.status === 'DRAFT');
   if (!draft) return res.status(400).json({ error: 'No draft playlist found to publish' });
-  const draftItems = db.playlistItems.filter(i => i.playlistId === draft.id && i.enabled).sort((a,b) => a.sortOrder - b.sortOrder);
+  const nowMs = Date.now();
+  const draftItems = db.playlistItems.filter(i => i.playlistId === draft.id && i.enabled && (!i.validFrom || Date.parse(i.validFrom) <= nowMs) && (!i.expiresAt || Date.parse(i.expiresAt) > nowMs)).sort((a,b) => a.sortOrder - b.sortOrder);
   if (!draftItems.length) return res.status(400).json({ error: 'Cannot publish an empty playlist' });
   const requestedGroups = [...new Set(req.body.groupIds || [])] as string[];
   const groups = db.screenGroups.filter(g => requestedGroups.includes(g.id) && g.isActive);
@@ -939,17 +1106,23 @@ app.post('/api/publications', authMiddleware, (req: any, res: Response) => {
   const assets = draftItems.map(item => {
     const asset = db.mediaAssets.find(a => a.id === item.mediaAssetId);
     if (!asset) return null;
-    return { assetId: asset.id, filename: asset.originalName, order: item.sortOrder, durationSeconds: item.durationSeconds || 10, sha256: asset.sha256, fileSize: Number(asset.fileSize), mimeType: asset.mimeType, downloadUrl: `/api/device/media/${asset.id}` };
+    if ((asset.validFrom && Date.parse(asset.validFrom) > nowMs) || (asset.expiresAt && Date.parse(asset.expiresAt) <= nowMs) || asset.deletedAt) return null;
+    return { assetId: asset.id, filename: asset.originalName, order: item.sortOrder, durationSeconds: item.durationSeconds || null, sha256: asset.sha256, fileSize: Number(asset.fileSize), mimeType: asset.mimeType, validFrom: item.validFrom || asset.validFrom || null, expiresAt: item.expiresAt || asset.expiresAt || draft.expiresAt || null, downloadUrl: `/api/device/media/${asset.id}` };
   }).filter(Boolean);
   if (assets.length !== draftItems.length) return res.status(409).json({ error: 'Draft references missing media' });
   const version = Math.max(0, ...db.publishJobs.map(j => Number(j.contentVersion) || 0)) + 1;
-  const job = { id: 'job-' + crypto.randomUUID(), ownerId: sourceScreen.userId, publisherId: req.user.id, publisherName: req.user.name, idempotencyKey, sourceScreenId: sourceScreen.id, contentVersion: version, playlistVersion: draft.version, groupSnapshots: groups.map(g => ({ id: g.id, name: g.name })), targetCount: ids.size, createdAt: now };
+  const selectedLayout = req.body.layoutId ? db.layouts.find(l => l.id === req.body.layoutId && owns(req.user,l) && !l.deletedAt) : null;
+  if (req.body.layoutId && !selectedLayout) return res.status(400).json({ error: 'Layout is unavailable' });
+  const job = { id: 'job-' + crypto.randomUUID(), ownerId: sourceScreen.userId, publisherId: req.user.id, publisherName: req.user.name, idempotencyKey, sourceScreenId: sourceScreen.id, playlistId: draft.id, layoutId: selectedLayout?.id || null, contentVersion: version, playlistVersion: draft.version, groupSnapshots: groups.map(g => ({ id: g.id, name: g.name })), targetCount: ids.size, createdAt: now };
   db.publishJobs.push(job);
   for (const screenId of ids) {
     const screen = db.screens.find(s => s.id === screenId)!;
     for (const old of db.publishTargets.filter(t => t.screenId === screenId && !['PLAYING','FAILED','SUPERSEDED'].includes(t.status))) { old.status = 'SUPERSEDED'; old.supersededAt = now; }
     const config = db.screenConfigurations.find(c => c.screenId === screenId);
-    const target: any = { id: 'target-' + crypto.randomUUID(), jobId: job.id, screenId, screenNameSnapshot: screen.name, deviceId: screen.deviceId, targetVersion: version, playlistVersion: draft.version, configurationVersion: config?.version || 1, configurationSnapshot: config ? { ...config } : null, manifestSnapshot: assets, status: 'QUEUED', totalBytes: assets.reduce((n: number, a: any) => n + a.fileSize, 0), totalFiles: assets.length, bytesDownloaded: 0, filesCompleted: 0, progressPercent: 0, activeVersion: null, previousActiveVersion: db.heartbeats.find(h => h.deviceId === screen.deviceId)?.appliedVersion || 0, lastProgressAt: now, errorCode: null, errorMessage: null, createdAt: now };
+    const globalSettings=db.playbackSettings.find(s=>s.scope==='GLOBAL')?.values||{}, groupSettings=screen.settingsGroupId?db.playbackSettings.find(s=>s.scope==='GROUP'&&s.scopeId===screen.settingsGroupId)?.values||{}:{}, screenSettings=db.playbackSettings.find(s=>s.scope==='SCREEN'&&s.scopeId===screen.id)?.values||{};
+    const effectiveSettings={...DEFAULT_PLAYBACK_SETTINGS,...globalSettings,...groupSettings,...screenSettings,...Object.fromEntries(Object.entries(draft).filter(([k,v])=>['loop','shuffle'].includes(k)&&v!==null&&v!==undefined))};
+    const scheduleBundle=db.schedules.filter(s=>!s.deletedAt&&s.enabled!==false&&s.targetScreenIds?.includes(screenId)).map(s=>({...s,playlist:db.playlists.find(p=>p.id===s.playlistId),items:db.playlistItems.filter(i=>i.playlistId===s.playlistId).map(i=>({...i,mediaAsset:db.mediaAssets.find(a=>a.id===i.mediaAssetId)})),layout:db.layouts.find(l=>l.id===s.layoutId)}));
+    const target: any = { id: 'target-' + crypto.randomUUID(), jobId: job.id, screenId, screenNameSnapshot: screen.name, deviceId: screen.deviceId, targetVersion: version, playlistVersion: draft.version, configurationVersion: config?.version || 1, configurationSnapshot: config ? { ...config } : null, layoutSnapshot:selectedLayout?{...selectedLayout}:null,settingsSnapshot:effectiveSettings,scheduleSnapshot:scheduleBundle, manifestSnapshot: assets, status: 'QUEUED', totalBytes: assets.reduce((n: number, a: any) => n + a.fileSize, 0), totalFiles: assets.length, bytesDownloaded: 0, filesCompleted: 0, progressPercent: 0, activeVersion: null, previousActiveVersion: db.heartbeats.find(h => h.deviceId === screen.deviceId)?.appliedVersion || 0, lastProgressAt: now, errorCode: null, errorMessage: null, createdAt: now };
     db.publishTargets.push(target); startAttempt(target);
     notifyDevice(screen.deviceId, 'CONTENT_UPDATE_AVAILABLE', { publishJobId: job.id, targetId: target.id, attemptId: target.attemptId, manifestVersion: version });
   }
@@ -1038,6 +1211,8 @@ app.get('/api/screens', authMiddleware, (req: any, res: Response) => {
       desiredVersion: db.publishTargets.filter(t => t.screenId === screen.id && t.status !== 'SUPERSEDED').sort((a,b) => b.targetVersion - a.targetVersion)[0]?.targetVersion || 0,
       activeVersion: db.publishTargets.filter(t => t.screenId === screen.id && t.status === 'PLAYING').sort((a,b) => b.targetVersion - a.targetVersion)[0]?.activeVersion || latestSync?.appliedVersion || 0,
       groupIds: db.screenGroupMembers.filter(m => m.screenId === screen.id).map(m => m.groupId),
+      assignedPlaylist: db.playlists.find(p=>p.id===screen.assignedPlaylistId&&!p.deletedAt)||null,
+      unpublishedChanges: Boolean(screen.assignedPlaylistId && (!db.publishJobs.filter(j=>j.sourceScreenId===screen.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt))[0] || new Date(screen.assignmentUpdatedAt||0)>new Date(db.publishJobs.filter(j=>j.sourceScreenId===screen.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt))[0]?.createdAt||0) || new Date(db.playlists.find(p=>p.id===screen.assignedPlaylistId)?.updatedAt||0)>new Date(db.publishJobs.filter(j=>j.sourceScreenId===screen.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt))[0]?.createdAt||0))),
       lastSeenAt: device?.lastSeenAt
     };
   });
@@ -1076,7 +1251,9 @@ app.get('/api/screens/:id', authMiddleware, (req: any, res: Response) => {
     configuration,
     publishedVersion: publishedPlaylist ? publishedPlaylist.version : 0,
     hasDraftChanges: Boolean(draftPlaylist),
-    latestSync
+    latestSync,
+    assignedPlaylist: db.playlists.find(p=>p.id===screen.assignedPlaylistId&&!p.deletedAt)||null,
+    unpublishedChanges: Boolean(screen.assignedPlaylistId && (!db.publishJobs.filter(j=>j.sourceScreenId===screen.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt))[0] || new Date(screen.assignmentUpdatedAt||0)>new Date(db.publishJobs.filter(j=>j.sourceScreenId===screen.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt))[0]?.createdAt||0) || new Date(db.playlists.find(p=>p.id===screen.assignedPlaylistId)?.updatedAt||0)>new Date(db.publishJobs.filter(j=>j.sourceScreenId===screen.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt))[0]?.createdAt||0)))
   });
 });
 
@@ -1147,6 +1324,13 @@ app.post('/api/screens/:id/renew', authMiddleware, adminMiddleware, (req: any, r
   notifyDevice(screen.deviceId, 'SCREEN_RENEWED', { screenId: screen.id, validUntil: screen.validUntil });
   broadcastEvent('SCREEN_LIST_UPDATED', { screenId: screen.id, renewed: true });
   res.json({ ...screen, isSuspended: false });
+});
+
+app.put('/api/screens/:id/playlist-assignment', authMiddleware, (req:any,res:Response) => {
+  const screen=db.screens.find(s=>s.id===req.params.id);if(!screen)return res.status(404).json({error:'Screen not found'});if(!canAccessScreen(req.user,screen))return res.status(403).json({error:'Access denied'});
+  const playlistId=req.body.playlistId||null;
+  if(playlistId){const playlist=db.playlists.find(p=>p.id===playlistId&&p.libraryPlaylist&&!p.deletedAt);if(!playlist||!owns(req.user,playlist))return res.status(403).json({error:'Playlist is unavailable'});}
+  screen.assignedPlaylistId=playlistId;screen.assignmentUpdatedAt=new Date().toISOString();screen.updatedAt=screen.assignmentUpdatedAt;saveDB(db);logAudit(req.user.id,screen.deviceId,'SCREEN_PLAYLIST_ASSIGNED',{screenId:screen.id,playlistId});res.json(screen);
 });
 
 // -------------------------------------------------------------
@@ -1253,7 +1437,7 @@ app.post('/api/media/upload', authMiddleware, upload.array('files', 10), async (
       continue;
     }
     const dimensions = imageDimensions(file.buffer, file.mimetype);
-    if (!dimensions) return res.status(400).json({ error: `${file.originalname} is not a valid JPEG or PNG image.` });
+    if (!dimensions) return res.status(400).json({ error: `${file.originalname} is not a valid supported media file.` });
     if (dimensions.width !== 1920 || dimensions.height !== 1080) {
       return res.status(400).json({ error: `${file.originalname} must be processed to 1920×1080 before upload.` });
     }
@@ -1372,6 +1556,12 @@ app.delete('/api/media/:id', authMiddleware, async (req: any, res: Response) => 
   broadcastEvent('MEDIA_LIBRARY_UPDATED', { deletedId: assetId });
 
   res.json({ message: 'Media asset deleted successfully' });
+});
+
+app.patch('/api/media/:id/expiry', authMiddleware, (req:any,res:Response) => {
+  const asset=db.mediaAssets.find(a=>a.id===req.params.id);if(!asset)return res.status(404).json({error:'Asset not found'});if(!owns(req.user,asset))return res.status(403).json({error:'Access denied'});
+  const validity=validateValidity(req.body);if(validity.error)return res.status(400).json({error:validity.error});const grace=Number(req.body.cleanupGraceDays??7);if(!Number.isInteger(grace)||grace<0||grace>3650)return res.status(400).json({error:'Cleanup grace must be 0-3650 days'});
+  Object.assign(asset,validity,{autoDelete:Boolean(req.body.autoDelete),cleanupGraceDays:grace,updatedAt:new Date().toISOString()});saveDB(db);logAudit(req.user.id,null,'MEDIA_EXPIRY_UPDATED',{assetId:asset.id,expiresAt:asset.expiresAt,autoDelete:asset.autoDelete});res.json(asset);
 });
 
 // -------------------------------------------------------------
@@ -1583,6 +1773,10 @@ app.get('/api/device/manifest', deviceAuthMiddleware, (req: any, res: Response) 
       playlistVersion: desiredTarget.playlistVersion,
       configurationVersion: desiredTarget.configurationVersion,
       screenConfiguration: desiredTarget.configurationSnapshot,
+      layout: desiredTarget.layoutSnapshot || null,
+      settings: desiredTarget.settingsSnapshot || DEFAULT_PLAYBACK_SETTINGS,
+      schedules: desiredTarget.scheduleSnapshot || [],
+      serverTime: new Date().toISOString(),
       items: desiredTarget.manifestSnapshot
     });
   }

@@ -101,7 +101,10 @@ model Screen {
   updatedAt     DateTime             @updatedAt
   device        Device               @relation(fields: [deviceId], references: [id], onDelete: Cascade)
   configuration ScreenConfiguration?
-  playlists     Playlist[]
+  playlists     Playlist[] @relation("ScreenPlaylists")
+  assignedPlaylistId String?
+  assignedPlaylist Playlist? @relation("AssignedPlaylist", fields: [assignedPlaylistId], references: [id], onDelete: Restrict)
+  settingsGroupId String?
 }
 
 model ScreenConfiguration {
@@ -133,19 +136,35 @@ model MediaAsset {
   height       Int
   sha256       String
   createdAt    DateTime       @default(now())
+  validFrom    DateTime?
+  expiresAt    DateTime?
+  autoDelete   Boolean        @default(false)
+  cleanupGraceDays Int?
+  deletedAt    DateTime?
   items        PlaylistItem[]
 }
 
 model Playlist {
   id          String         @id @default(uuid())
-  screenId    String
+  screenId    String?
   version     Int
   status      PlaylistStatus @default(DRAFT)
   createdBy   String
   publishedAt DateTime?
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
-  screen      Screen         @relation(fields: [screenId], references: [id], onDelete: Cascade)
+  ownerId     String?
+  name        String?
+  description String?
+  libraryPlaylist Boolean    @default(false)
+  loop        Boolean?
+  shuffle     Boolean?
+  validFrom   DateTime?
+  expiresAt   DateTime?
+  autoDelete  Boolean        @default(false)
+  deletedAt   DateTime?
+  screen      Screen?        @relation("ScreenPlaylists", fields: [screenId], references: [id], onDelete: Cascade)
+  assignedScreens Screen[]   @relation("AssignedPlaylist")
   items       PlaylistItem[]
 
   @@unique([screenId, version])
@@ -158,10 +177,77 @@ model PlaylistItem {
   sortOrder       Int
   durationSeconds Int?
   enabled         Boolean    @default(true)
+  validFrom       DateTime?
+  expiresAt       DateTime?
   playlist        Playlist   @relation(fields: [playlistId], references: [id], onDelete: Cascade)
   mediaAsset      MediaAsset @relation(fields: [mediaAssetId], references: [id], onDelete: Restrict)
 
   @@index([playlistId, sortOrder])
+}
+
+model ContentLayout {
+  id              String   @id @default(uuid())
+  ownerId         String
+  name            String
+  description     String?
+  width           Int
+  height          Int
+  orientation     String
+  backgroundColor String
+  template        String
+  zones           Json
+  version         Int      @default(1)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  deletedAt       DateTime?
+  @@index([ownerId, deletedAt])
+}
+
+model ContentSchedule {
+  id              String   @id @default(uuid())
+  ownerId         String
+  name            String
+  playlistId      String
+  layoutId        String?
+  screenIds       Json
+  groupIds        Json
+  targetScreenIds Json
+  startDate       DateTime
+  endDate         DateTime?
+  weekdays        Json
+  startTime       String
+  endTime         String
+  allDay          Boolean  @default(false)
+  timezone        String
+  priority        Int      @default(0)
+  enabled         Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  deletedAt       DateTime?
+  @@index([ownerId, enabled])
+  @@index([playlistId])
+}
+
+model PlaybackSetting {
+  id        String   @id @default(uuid())
+  ownerId   String
+  scope     String
+  scopeId   String
+  values    Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([scope, scopeId])
+  @@index([ownerId, scope])
+}
+
+model CleanupRun {
+  id          String   @id @default(uuid())
+  status      String
+  eligibleIds Json
+  deletedIds  Json
+  errors      Json
+  startedAt   DateTime @default(now())
+  completedAt DateTime?
 }
 
 model DeviceSync {
@@ -234,6 +320,74 @@ model ScreenGroupMember {
 
   @@unique([groupId, screenId])
   @@index([screenId])
+}
+
+enum SettingsScope {
+  COMMON
+  GROUP
+  SCREEN
+}
+
+enum SettingsDeliveryStatus {
+  PENDING
+  RECEIVED
+  APPLYING
+  APPLIED
+  FAILED
+}
+
+model GeneralSettingsDraft {
+  id        String        @id @default(uuid())
+  ownerId   String
+  scope     SettingsScope
+  scopeId   String
+  overrides Json
+  updatedBy String
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@unique([ownerId, scope, scopeId])
+}
+
+model GeneralSettingsRevision {
+  id          String        @id @default(uuid())
+  ownerId     String
+  scope       SettingsScope
+  scopeId     String
+  version     Int
+  overrides   Json
+  actorId     String
+  publishedAt DateTime      @default(now())
+
+  @@unique([ownerId, scope, scopeId, version])
+}
+
+model SettingsPublication {
+  id             String   @id @default(uuid())
+  ownerId        String
+  revisionId     String
+  idempotencyKey String
+  actorId        String
+  createdAt      DateTime @default(now())
+
+  @@unique([actorId, idempotencyKey])
+}
+
+model DeviceSettingsState {
+  id                      String                 @id @default(uuid())
+  deviceId                String                 @unique
+  publicationId           String
+  desiredVersion          Int                    @default(0)
+  receivedVersion         Int                    @default(0)
+  appliedVersion          Int                    @default(0)
+  status                  SettingsDeliveryStatus @default(PENDING)
+  effectiveSettings       Json
+  unsupportedCapabilities Json
+  errorCode               String?
+  errorMessage            String?
+  lastSeenAt              DateTime?
+  lastAppliedAt           DateTime?
+  updatedAt               DateTime               @updatedAt
 }
 
 model PublishJob {
