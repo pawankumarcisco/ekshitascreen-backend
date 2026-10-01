@@ -150,10 +150,15 @@ let postgresSaveChain: Promise<void> = Promise.resolve();
 let postgresReady = false;
 let db = loadDB();
 
-// Additive state migration for installations created before groups/publications.
-for (const key of ['screenGroups', 'screenGroupMembers', 'publishJobs', 'publishTargets', 'publishAttempts', 'publishEvents'] as const) {
-  if (!Array.isArray(db[key])) db[key] = [];
+function normalizeState(state: DBState): boolean {
+  let changed = false;
+  // Additive state migration for installations created before groups/publications.
+  for (const key of ['screenGroups', 'screenGroupMembers', 'publishJobs', 'publishTargets', 'publishAttempts', 'publishEvents'] as const) {
+    if (!Array.isArray(state[key])) { state[key] = []; changed = true; }
+  }
+  return changed;
 }
+normalizeState(db);
 
 function schedulePostgresSave(serialized: string) {
   if (!postgres || !postgresReady) return;
@@ -199,7 +204,12 @@ async function initializePostgres() {
   const result = await postgres.query<{ data: DBState }>('SELECT data FROM app_state WHERE id = 1');
   if (result.rows[0]?.data) {
     db = result.rows[0].data;
+    const migrated = normalizeState(db);
     console.log('[Postgres] Loaded persisted EkshitaScreen state.');
+    if (migrated) {
+      await postgres.query('UPDATE app_state SET data = $1::jsonb, updated_at = NOW() WHERE id = 1', [JSON.stringify(db)]);
+      console.log('[Postgres] Migrated persisted state for screen groups and publications.');
+    }
   } else {
     await postgres.query(
       'INSERT INTO app_state (id, data) VALUES (1, $1::jsonb)',
