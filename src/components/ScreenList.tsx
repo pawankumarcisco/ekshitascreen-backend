@@ -120,8 +120,8 @@ export const ScreenList: React.FC<ScreenListProps> = ({
                 <th className="py-3 px-4">Resolution</th>
                 <th className="py-3 px-4">Status</th>
                 <th className="py-3 px-4 text-center">Images</th>
-                <th className="py-3 px-4 text-center">Published</th>
-                <th className="py-3 px-4 text-center">Applied</th>
+                <th className="py-3 px-4 text-center">Desired</th>
+                <th className="py-3 px-4 text-center">Device active</th>
                 <th className="py-3 px-4">Last Seen</th>
                 <th className="py-3 px-4">Valid Until</th>
                 <th className="py-3 px-6 text-right">Actions</th>
@@ -174,7 +174,7 @@ export const ScreenList: React.FC<ScreenListProps> = ({
 
                     <td className="py-3.5 px-4 text-center font-mono tabular-nums">
                       <span className="font-semibold text-slate-900">
-                        v{screen.publishedVersion || 0}
+                        v{screen.desiredVersion || screen.publishedVersion || 0}
                       </span>
                       {screen.hasDraftChanges && (
                         <span className="block text-[10px] text-amber-600 font-sans">
@@ -185,7 +185,7 @@ export const ScreenList: React.FC<ScreenListProps> = ({
 
                     <td className="py-3.5 px-4 text-center font-mono tabular-nums">
                       <span className={`font-semibold ${isOutOfSync ? 'text-amber-600' : 'text-slate-700'}`}>
-                        v{screen.appliedVersion || 0}
+                        v{screen.activeVersion || screen.appliedVersion || 0}
                       </span>
                     </td>
 

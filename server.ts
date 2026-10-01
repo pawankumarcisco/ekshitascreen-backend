@@ -66,6 +66,12 @@ interface DBState {
   deviceSyncs: any[];
   heartbeats: any[];
   auditLogs: any[];
+  screenGroups: any[];
+  screenGroupMembers: any[];
+  publishJobs: any[];
+  publishTargets: any[];
+  publishAttempts: any[];
+  publishEvents: any[];
 }
 
 function loadDB(): DBState {
@@ -110,7 +116,13 @@ function loadDB(): DBState {
     playlistItems: [],
     deviceSyncs: [],
     heartbeats: [],
-    auditLogs: []
+    auditLogs: [],
+    screenGroups: [],
+    screenGroupMembers: [],
+    publishJobs: [],
+    publishTargets: [],
+    publishAttempts: [],
+    publishEvents: []
   };
 
   saveDB(initialDB);
@@ -137,6 +149,11 @@ let postgresSaveTimer: NodeJS.Timeout | null = null;
 let postgresSaveChain: Promise<void> = Promise.resolve();
 let postgresReady = false;
 let db = loadDB();
+
+// Additive state migration for installations created before groups/publications.
+for (const key of ['screenGroups', 'screenGroupMembers', 'publishJobs', 'publishTargets', 'publishAttempts', 'publishEvents'] as const) {
+  if (!Array.isArray(db[key])) db[key] = [];
+}
 
 function schedulePostgresSave(serialized: string) {
   if (!postgres || !postgresReady) return;
@@ -779,8 +796,187 @@ app.post('/api/screens/register', authMiddleware, adminMiddleware, (req: any, re
   });
 });
 
+const PUBLISH_STATES = ['QUEUED', 'DOWNLOADING', 'VERIFYING', 'READY', 'PLAYING', 'FAILED', 'SUPERSEDED'];
+const STATE_RANK: Record<string, number> = { QUEUED: 0, DOWNLOADING: 1, VERIFYING: 2, READY: 3, PLAYING: 4 };
+
+function visibleScreensFor(user: any) {
+  return user.role === 'ADMIN' ? db.screens : db.screens.filter(s => s.userId === user.id);
+}
+
+function summarizeJob(jobId: string) {
+  const counts = Object.fromEntries(PUBLISH_STATES.map(status => [status.toLowerCase(), 0]));
+  for (const target of db.publishTargets.filter(t => t.jobId === jobId)) counts[target.status.toLowerCase()]++;
+  return counts;
+}
+
+function enrichJob(job: any) {
+  const targets = db.publishTargets.filter(t => t.jobId === job.id).map(target => ({
+    ...target,
+    screen: db.screens.find(s => s.id === target.screenId) || { id: target.screenId, name: target.screenNameSnapshot },
+    attempts: db.publishAttempts.filter(a => a.targetId === target.id)
+  }));
+  return { ...job, counts: summarizeJob(job.id), targets };
+}
+
+function startAttempt(target: any, automatic = false) {
+  const prior = db.publishAttempts.filter(a => a.targetId === target.id);
+  const attempt = {
+    id: 'attempt-' + crypto.randomUUID(), targetId: target.id, number: prior.length + 1,
+    status: 'QUEUED', eventSequence: 0, bytesDownloaded: 0, totalBytes: target.totalBytes,
+    filesCompleted: 0, totalFiles: target.totalFiles, currentFile: null, progressPercent: 0,
+    errorCode: null, errorMessage: null, automatic, createdAt: new Date().toISOString(),
+    startedAt: null, readyAt: null, activatedAt: null, playbackConfirmedAt: null, completedAt: null
+  };
+  target.attemptId = attempt.id; target.attemptNumber = attempt.number; target.status = 'QUEUED';
+  target.errorCode = null; target.errorMessage = null; target.lastProgressAt = attempt.createdAt;
+  db.publishAttempts.push(attempt);
+  return attempt;
+}
+
 // -------------------------------------------------------------
-// 5. SCREENS MANAGEMENT
+// 5. SCREEN GROUPS
+// -------------------------------------------------------------
+app.get('/api/screen-groups', authMiddleware, (req: any, res: Response) => {
+  const allowed = new Set(visibleScreensFor(req.user).map(s => s.id));
+  const now = Date.now();
+  res.json(db.screenGroups.filter(g => req.user.role === 'ADMIN' || g.ownerId === req.user.id).map(group => {
+    const memberIds = db.screenGroupMembers.filter(m => m.groupId === group.id && allowed.has(m.screenId)).map(m => m.screenId);
+    const members = db.screens.filter(s => memberIds.includes(s.id));
+    const online = members.filter(s => {
+      const d = db.devices.find(device => device.id === s.deviceId);
+      return d?.lastSeenAt && now - new Date(d.lastSeenAt).getTime() <= 90000;
+    }).length;
+    return { ...group, screenIds: memberIds, totalScreens: members.length, onlineScreens: online, offlineScreens: members.length - online };
+  }));
+});
+
+app.post('/api/screen-groups', authMiddleware, (req: any, res: Response) => {
+  const name = String(req.body.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Group name is required' });
+  const screenIds = [...new Set(Array.isArray(req.body.screenIds) ? req.body.screenIds : [])] as string[];
+  const allowed = new Set(visibleScreensFor(req.user).map(s => s.id));
+  if (screenIds.some(id => !allowed.has(id))) return res.status(403).json({ error: 'One or more screens are outside your authorized scope' });
+  const now = new Date().toISOString();
+  const group = { id: 'group-' + crypto.randomUUID(), name, description: String(req.body.description || ''), ownerId: req.user.id, isActive: true, createdBy: req.user.id, updatedBy: req.user.id, createdAt: now, updatedAt: now };
+  db.screenGroups.push(group);
+  for (const screenId of screenIds) db.screenGroupMembers.push({ id: 'member-' + crypto.randomUUID(), groupId: group.id, screenId, createdAt: now, createdBy: req.user.id });
+  saveDB(db); logAudit(req.user.id, null, 'SCREEN_GROUP_CREATED', { groupId: group.id, name, screenIds });
+  res.status(201).json({ ...group, screenIds });
+});
+
+app.patch('/api/screen-groups/:id', authMiddleware, (req: any, res: Response) => {
+  const group = db.screenGroups.find(g => g.id === req.params.id);
+  if (!group) return res.status(404).json({ error: 'Group not found' });
+  if (req.user.role !== 'ADMIN' && group.ownerId !== req.user.id) return res.status(403).json({ error: 'Access denied' });
+  const screenIds = req.body.screenIds === undefined ? null : [...new Set(req.body.screenIds || [])] as string[];
+  const allowed = new Set(visibleScreensFor(req.user).map(s => s.id));
+  if (screenIds?.some(id => !allowed.has(id))) return res.status(403).json({ error: 'One or more screens are outside your authorized scope' });
+  if (req.body.name !== undefined) { const name = String(req.body.name).trim(); if (!name) return res.status(400).json({ error: 'Group name is required' }); group.name = name; }
+  if (req.body.description !== undefined) group.description = String(req.body.description || '');
+  if (req.body.isActive !== undefined) group.isActive = Boolean(req.body.isActive);
+  if (screenIds) {
+    db.screenGroupMembers = db.screenGroupMembers.filter(m => m.groupId !== group.id);
+    for (const screenId of screenIds) db.screenGroupMembers.push({ id: 'member-' + crypto.randomUUID(), groupId: group.id, screenId, createdAt: new Date().toISOString(), createdBy: req.user.id });
+  }
+  group.updatedBy = req.user.id; group.updatedAt = new Date().toISOString();
+  saveDB(db); logAudit(req.user.id, null, 'SCREEN_GROUP_UPDATED', { groupId: group.id, screenIds });
+  res.json({ ...group, screenIds: db.screenGroupMembers.filter(m => m.groupId === group.id).map(m => m.screenId) });
+});
+
+app.delete('/api/screen-groups/:id', authMiddleware, (req: any, res: Response) => {
+  const group = db.screenGroups.find(g => g.id === req.params.id);
+  if (!group) return res.status(404).json({ error: 'Group not found' });
+  if (req.user.role !== 'ADMIN' && group.ownerId !== req.user.id) return res.status(403).json({ error: 'Access denied' });
+  db.screenGroups = db.screenGroups.filter(g => g.id !== group.id);
+  db.screenGroupMembers = db.screenGroupMembers.filter(m => m.groupId !== group.id);
+  saveDB(db); logAudit(req.user.id, null, 'SCREEN_GROUP_DELETED', { groupId: group.id, name: group.name });
+  res.json({ message: 'Group deleted; screens and publication history were preserved' });
+});
+
+app.post('/api/publications/resolve-targets', authMiddleware, (req: any, res: Response) => {
+  const allowed = new Set(visibleScreensFor(req.user).map(s => s.id));
+  const requestedGroups = [...new Set(req.body.groupIds || [])] as string[];
+  const groups = db.screenGroups.filter(g => requestedGroups.includes(g.id) && g.isActive);
+  if (groups.length !== requestedGroups.length || groups.some(g => req.user.role !== 'ADMIN' && g.ownerId !== req.user.id)) return res.status(403).json({ error: 'Unauthorized or inactive group target' });
+  const resolved = new Set<string>(req.body.screenIds || []);
+  for (const member of db.screenGroupMembers) if (requestedGroups.includes(member.groupId)) resolved.add(member.screenId);
+  if ([...resolved].some(id => !allowed.has(id))) return res.status(403).json({ error: 'Unauthorized screen target' });
+  const screens = db.screens.filter(s => resolved.has(s.id));
+  res.json({ uniqueCount: screens.length, screens });
+});
+
+app.post('/api/publications', authMiddleware, (req: any, res: Response) => {
+  if (req.user.role === 'VIEWER') return res.status(403).json({ error: 'Publish permission required' });
+  const idempotencyKey = String(req.body.idempotencyKey || req.headers['idempotency-key'] || '').trim();
+  if (!idempotencyKey) return res.status(400).json({ error: 'A client-generated idempotencyKey is required' });
+  const existing = db.publishJobs.find(j => j.ownerId === req.user.id && j.idempotencyKey === idempotencyKey);
+  if (existing) return res.json(enrichJob(existing));
+  const sourceScreen = db.screens.find(s => s.id === req.body.sourceScreenId);
+  if (!sourceScreen || !canAccessScreen(req.user, sourceScreen)) return res.status(403).json({ error: 'Unauthorized source screen' });
+  const draft = db.playlists.find(p => p.screenId === sourceScreen.id && p.status === 'DRAFT');
+  if (!draft) return res.status(400).json({ error: 'No draft playlist found to publish' });
+  const draftItems = db.playlistItems.filter(i => i.playlistId === draft.id && i.enabled).sort((a,b) => a.sortOrder - b.sortOrder);
+  if (!draftItems.length) return res.status(400).json({ error: 'Cannot publish an empty playlist' });
+  const requestedGroups = [...new Set(req.body.groupIds || [])] as string[];
+  const groups = db.screenGroups.filter(g => requestedGroups.includes(g.id) && g.isActive);
+  if (groups.length !== requestedGroups.length || groups.some(g => req.user.role !== 'ADMIN' && g.ownerId !== req.user.id)) return res.status(403).json({ error: 'Unauthorized or inactive group target' });
+  const ids = new Set<string>(req.body.screenIds || []);
+  for (const m of db.screenGroupMembers) if (requestedGroups.includes(m.groupId)) ids.add(m.screenId);
+  const allowed = new Set(visibleScreensFor(req.user).map(s => s.id));
+  if (!ids.size) return res.status(400).json({ error: 'Select at least one screen or group' });
+  if ([...ids].some(id => !allowed.has(id))) return res.status(403).json({ error: 'Unauthorized screen target' });
+  const now = new Date().toISOString();
+  const assets = draftItems.map(item => {
+    const asset = db.mediaAssets.find(a => a.id === item.mediaAssetId);
+    if (!asset) return null;
+    return { assetId: asset.id, filename: asset.originalName, order: item.sortOrder, durationSeconds: item.durationSeconds || 10, sha256: asset.sha256, fileSize: Number(asset.fileSize), mimeType: asset.mimeType, downloadUrl: `/api/device/media/${asset.id}` };
+  }).filter(Boolean);
+  if (assets.length !== draftItems.length) return res.status(409).json({ error: 'Draft references missing media' });
+  const version = Math.max(0, ...db.publishJobs.map(j => Number(j.contentVersion) || 0)) + 1;
+  const job = { id: 'job-' + crypto.randomUUID(), ownerId: sourceScreen.userId, publisherId: req.user.id, publisherName: req.user.name, idempotencyKey, sourceScreenId: sourceScreen.id, contentVersion: version, playlistVersion: draft.version, groupSnapshots: groups.map(g => ({ id: g.id, name: g.name })), targetCount: ids.size, createdAt: now };
+  db.publishJobs.push(job);
+  for (const screenId of ids) {
+    const screen = db.screens.find(s => s.id === screenId)!;
+    for (const old of db.publishTargets.filter(t => t.screenId === screenId && !['PLAYING','FAILED','SUPERSEDED'].includes(t.status))) { old.status = 'SUPERSEDED'; old.supersededAt = now; }
+    const config = db.screenConfigurations.find(c => c.screenId === screenId);
+    const target: any = { id: 'target-' + crypto.randomUUID(), jobId: job.id, screenId, screenNameSnapshot: screen.name, deviceId: screen.deviceId, targetVersion: version, playlistVersion: draft.version, configurationVersion: config?.version || 1, configurationSnapshot: config ? { ...config } : null, manifestSnapshot: assets, status: 'QUEUED', totalBytes: assets.reduce((n: number, a: any) => n + a.fileSize, 0), totalFiles: assets.length, bytesDownloaded: 0, filesCompleted: 0, progressPercent: 0, activeVersion: null, previousActiveVersion: db.heartbeats.find(h => h.deviceId === screen.deviceId)?.appliedVersion || 0, lastProgressAt: now, errorCode: null, errorMessage: null, createdAt: now };
+    db.publishTargets.push(target); startAttempt(target);
+    notifyDevice(screen.deviceId, 'CONTENT_UPDATE_AVAILABLE', { publishJobId: job.id, targetId: target.id, attemptId: target.attemptId, manifestVersion: version });
+  }
+  saveDB(db); logAudit(req.user.id, null, 'PUBLICATION_CREATED', { jobId: job.id, resolvedScreenIds: [...ids], groupSnapshots: job.groupSnapshots });
+  broadcastEvent('PUBLICATION_UPDATED', { jobId: job.id });
+  res.status(201).json(enrichJob(job));
+});
+
+app.get('/api/publications', authMiddleware, (req: any, res: Response) => res.json(db.publishJobs.filter(j => req.user.role === 'ADMIN' || j.ownerId === req.user.id).sort((a,b) => b.createdAt.localeCompare(a.createdAt)).map(enrichJob)));
+app.get('/api/publications/:id', authMiddleware, (req: any, res: Response) => {
+  const job = db.publishJobs.find(j => j.id === req.params.id);
+  if (!job) return res.status(404).json({ error: 'Publication not found' });
+  if (req.user.role !== 'ADMIN' && job.ownerId !== req.user.id) return res.status(403).json({ error: 'Access denied' });
+  res.json(enrichJob(job));
+});
+
+function retryTarget(req: any, res: Response, target: any) {
+  if (!target || target.status !== 'FAILED') return res.status(409).json({ error: 'Only failed targets can be retried' });
+  const job = db.publishJobs.find(j => j.id === target.jobId);
+  if (!job || (req.user.role !== 'ADMIN' && job.ownerId !== req.user.id)) return res.status(403).json({ error: 'Access denied' });
+  const attempt = startAttempt(target); saveDB(db);
+  notifyDevice(target.deviceId, 'CONTENT_UPDATE_AVAILABLE', { publishJobId: job.id, targetId: target.id, attemptId: attempt.id, manifestVersion: target.targetVersion });
+  logAudit(req.user.id, target.deviceId, 'PUBLICATION_RETRY', { jobId: job.id, targetId: target.id, attemptId: attempt.id });
+  return res.json({ target, attempt });
+}
+app.post('/api/publications/:jobId/targets/:targetId/retry', authMiddleware, (req: any, res: Response) => retryTarget(req, res, db.publishTargets.find(t => t.id === req.params.targetId && t.jobId === req.params.jobId)));
+app.post('/api/publications/:jobId/retry-failed', authMiddleware, (req: any, res: Response) => {
+  const job = db.publishJobs.find(j => j.id === req.params.jobId);
+  if (!job || (req.user.role !== 'ADMIN' && job.ownerId !== req.user.id)) return res.status(403).json({ error: 'Access denied' });
+  const retried = db.publishTargets.filter(t => t.jobId === job.id && t.status === 'FAILED').map(t => ({ target: t, attempt: startAttempt(t) }));
+  for (const item of retried) notifyDevice(item.target.deviceId, 'CONTENT_UPDATE_AVAILABLE', { publishJobId: job.id, targetId: item.target.id, attemptId: item.attempt.id, manifestVersion: item.target.targetVersion });
+  saveDB(db); logAudit(req.user.id, null, 'PUBLICATION_RETRY_ALL', { jobId: job.id, count: retried.length });
+  res.json({ count: retried.length });
+});
+
+// -------------------------------------------------------------
+// 6. SCREENS MANAGEMENT
 // -------------------------------------------------------------
 app.get('/api/screens', authMiddleware, (req: any, res: Response) => {
   const now = Date.now();
@@ -829,6 +1025,9 @@ app.get('/api/screens', authMiddleware, (req: any, res: Response) => {
       itemCount: items.length,
       syncStatus: latestSync ? latestSync.status : 'UP_TO_DATE',
       appliedVersion: latestSync?.appliedVersion ?? (publishedPlaylist ? publishedPlaylist.version : 0),
+      desiredVersion: db.publishTargets.filter(t => t.screenId === screen.id && t.status !== 'SUPERSEDED').sort((a,b) => b.targetVersion - a.targetVersion)[0]?.targetVersion || 0,
+      activeVersion: db.publishTargets.filter(t => t.screenId === screen.id && t.status === 'PLAYING').sort((a,b) => b.targetVersion - a.targetVersion)[0]?.activeVersion || latestSync?.appliedVersion || 0,
+      groupIds: db.screenGroupMembers.filter(m => m.screenId === screen.id).map(m => m.groupId),
       lastSeenAt: device?.lastSeenAt
     };
   });
@@ -1129,8 +1328,11 @@ app.delete('/api/media/:id', authMiddleware, async (req: any, res: Response) => 
   const isReferencedInPublished = db.playlistItems.some(
     item => item.mediaAssetId === assetId && publishedPlaylistIds.has(item.playlistId)
   );
+  const isReferencedInRetainedManifest = db.publishTargets.some(target =>
+    Array.isArray(target.manifestSnapshot) && target.manifestSnapshot.some((item: any) => item.assetId === assetId)
+  );
 
-  if (isReferencedInPublished) {
+  if (isReferencedInPublished || isReferencedInRetainedManifest) {
     return res.status(409).json({
       error: 'Cannot delete media asset: It is currently active in a published playlist. Remove or replace it on the screen first.'
     });
@@ -1358,6 +1560,23 @@ app.get('/api/device/manifest', deviceAuthMiddleware, (req: any, res: Response) 
     return res.status(403).json({ error: 'Screen registration suspended', code: 'SCREEN_SUSPENDED', validUntil: screen.validUntil });
   }
 
+  const desiredTarget = db.publishTargets
+    .filter(t => t.deviceId === deviceId && !['SUPERSEDED', 'PLAYING'].includes(t.status))
+    .sort((a, b) => b.targetVersion - a.targetVersion)[0];
+  if (desiredTarget) {
+    return res.json({
+      publishJobId: desiredTarget.jobId,
+      targetId: desiredTarget.id,
+      attemptId: desiredTarget.attemptId,
+      manifestVersion: desiredTarget.targetVersion,
+      screenId: screen.id,
+      playlistVersion: desiredTarget.playlistVersion,
+      configurationVersion: desiredTarget.configurationVersion,
+      screenConfiguration: desiredTarget.configurationSnapshot,
+      items: desiredTarget.manifestSnapshot
+    });
+  }
+
   const config = db.screenConfigurations.find(c => c.screenId === screen.id) || {
     id: 'cfg-default',
     screenId: screen.id,
@@ -1418,7 +1637,7 @@ app.get('/api/device/manifest', deviceAuthMiddleware, (req: any, res: Response) 
   });
 });
 
-app.get('/api/device/media/:assetId', async (req: Request, res: Response) => {
+app.get('/api/device/media/:assetId', deviceAuthMiddleware, async (req: Request, res: Response) => {
   const asset = db.mediaAssets.find(a => a.id === req.params.assetId);
   if (!asset) {
     return res.status(404).json({ error: 'Asset not found' });
@@ -1465,9 +1684,9 @@ app.get('/api/device/media/:assetId', async (req: Request, res: Response) => {
 // -------------------------------------------------------------
 // 10. DEVICE HEARTBEAT & SYNC STATUS
 // -------------------------------------------------------------
-app.post('/api/device/heartbeat', (req: Request, res: Response) => {
-  const { deviceId, appVersion, playbackStatus, appliedVersion, freeStorageBytes } = req.body;
-  if (!deviceId) return res.status(400).json({ error: 'deviceId is required' });
+app.post('/api/device/heartbeat', deviceAuthMiddleware, (req: any, res: Response) => {
+  const { appVersion, playbackStatus, appliedVersion, freeStorageBytes } = req.body;
+  const deviceId = req.device.deviceId;
 
   const device = db.devices.find(d => d.id === deviceId);
   const screen = db.screens.find(s => s.deviceId === deviceId);
@@ -1513,45 +1732,40 @@ app.post('/api/device/heartbeat', (req: Request, res: Response) => {
   });
 });
 
-app.post('/api/device/sync-status', (req: Request, res: Response) => {
-  const { deviceId, targetVersion, appliedVersion, status, progress, errorMessage } = req.body;
-  if (!deviceId) return res.status(400).json({ error: 'deviceId is required' });
-
-  let sync = db.deviceSyncs
-    .filter(s => s.deviceId === deviceId)
-    .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())[0];
-
-  if (!sync || sync.targetVersion !== targetVersion) {
-    sync = {
-      id: 'sync-' + crypto.randomUUID(),
-      deviceId,
-      targetVersion: targetVersion || 1,
-      appliedVersion: appliedVersion || null,
-      status: status || 'DOWNLOADING',
-      progress: progress || 0,
-      errorMessage: errorMessage || null,
-      startedAt: new Date().toISOString(),
-      completedAt: status === 'COMPLETED' ? new Date().toISOString() : null
-    };
-    db.deviceSyncs.push(sync);
-  } else {
-    sync.status = status;
-    sync.progress = progress ?? sync.progress;
-    sync.appliedVersion = appliedVersion ?? sync.appliedVersion;
-    sync.errorMessage = errorMessage ?? sync.errorMessage;
-    if (status === 'COMPLETED') {
-      sync.completedAt = new Date().toISOString();
-    }
-  }
-
-  saveDB(db);
-
-  broadcastEvent('DEVICE_SYNC_UPDATE', {
-    deviceId,
-    sync
-  });
-
-  res.json({ status: 'ok', sync });
+app.post('/api/device/sync-status', deviceAuthMiddleware, (req: any, res: Response) => {
+  const deviceId = req.device.deviceId;
+  const { publishJobId, targetId, attemptId, manifestVersion, eventId, eventSequence, status,
+    bytesDownloaded, totalBytes, filesCompleted, totalFiles, currentFile, progressPercent,
+    errorCode, errorMessage, activeVersion } = req.body;
+  if (!PUBLISH_STATES.includes(status) || status === 'SUPERSEDED') return res.status(400).json({ error: 'Invalid device status' });
+  const target = db.publishTargets.find(t => t.id === targetId && t.jobId === publishJobId && t.deviceId === deviceId);
+  if (!target || target.attemptId !== attemptId || target.targetVersion !== manifestVersion) return res.status(409).json({ error: 'Stale or mismatched publication attempt' });
+  const newest = db.publishTargets.filter(t => t.deviceId === deviceId && t.status !== 'SUPERSEDED').sort((a,b) => b.targetVersion - a.targetVersion)[0];
+  if (!newest || newest.id !== target.id) return res.status(409).json({ error: 'Publication was superseded' });
+  const attempt = db.publishAttempts.find(a => a.id === attemptId);
+  if (!attempt) return res.status(404).json({ error: 'Attempt not found' });
+  if (eventId && db.publishEvents.some(e => e.attemptId === attemptId && e.eventId === eventId)) return res.json({ status: 'duplicate', target });
+  const sequence = Number(eventSequence || 0);
+  if (sequence <= attempt.eventSequence) return res.json({ status: 'ignored_out_of_order', target });
+  const currentRank = STATE_RANK[attempt.status] ?? -1, nextRank = STATE_RANK[status] ?? -1;
+  if (attempt.status !== 'FAILED' && status !== 'FAILED' && nextRank < currentRank) return res.status(409).json({ error: 'Status regression rejected' });
+  if (status === 'PLAYING' && Number(activeVersion) !== target.targetVersion) return res.status(409).json({ error: 'PLAYING requires acknowledgement of the correct active version' });
+  const now = new Date().toISOString();
+  const nextBytes = Math.max(attempt.bytesDownloaded || 0, Math.min(Number(bytesDownloaded || 0), Number(totalBytes ?? target.totalBytes)));
+  const calculated = target.totalBytes === 0 ? 100 : Math.floor(nextBytes * 100 / target.totalBytes);
+  Object.assign(attempt, { eventSequence: sequence, status, bytesDownloaded: nextBytes, totalBytes: Number(totalBytes ?? target.totalBytes), filesCompleted: Math.max(attempt.filesCompleted || 0, Number(filesCompleted || 0)), totalFiles: Number(totalFiles ?? target.totalFiles), currentFile: currentFile || null, progressPercent: Math.max(attempt.progressPercent || 0, calculated, Number(progressPercent || 0)), errorCode: status === 'FAILED' ? errorCode || 'DEVICE_ERROR' : null, errorMessage: status === 'FAILED' ? errorMessage || 'Device reported failure' : null });
+  if (!attempt.startedAt && status !== 'QUEUED') attempt.startedAt = now;
+  if (status === 'READY') attempt.readyAt = now;
+  if (status === 'PLAYING') { attempt.activatedAt ||= now; attempt.playbackConfirmedAt = now; attempt.completedAt = now; }
+  if (status === 'FAILED') attempt.completedAt = now;
+  Object.assign(target, { status, bytesDownloaded: attempt.bytesDownloaded, filesCompleted: attempt.filesCompleted, progressPercent: attempt.progressPercent, currentFile: attempt.currentFile, lastProgressAt: now, errorCode: attempt.errorCode, errorMessage: attempt.errorMessage });
+  if (status === 'READY') target.readyAt = now;
+  if (status === 'PLAYING') { target.activeVersion = activeVersion; target.activatedAt = now; target.playbackConfirmedAt = now; }
+  db.publishEvents.push({ id: 'event-' + crypto.randomUUID(), eventId: eventId || null, attemptId, targetId, status, eventSequence: sequence, details: { bytesDownloaded: nextBytes, filesCompleted, currentFile, errorCode, errorMessage }, createdAt: now });
+  if (db.publishEvents.length > 5000) db.publishEvents.splice(0, db.publishEvents.length - 5000);
+  saveDB(db); logAudit(null, deviceId, status === 'FAILED' ? 'PUBLICATION_FAILED' : status === 'PLAYING' ? 'PUBLICATION_PLAYING_CONFIRMED' : 'PUBLICATION_PROGRESS', { targetId, attemptId, status, manifestVersion });
+  broadcastEvent('PUBLICATION_UPDATED', { jobId: publishJobId, targetId });
+  res.json({ status: 'ok', target });
 });
 
 // -------------------------------------------------------------

@@ -6,6 +6,7 @@ import {
   AuditLog,
   HealthCheckResponse
 } from '../types';
+import type { ScreenGroup, PublishJob } from '../types';
 
 let authToken: string | null = localStorage.getItem('screencast_token');
 
@@ -198,6 +199,43 @@ export const api = {
       throw new Error(err.error || 'Failed to publish playlist');
     }
     return res.json();
+  },
+
+  async getScreenGroups(): Promise<ScreenGroup[]> {
+    const res = await fetch('/api/screen-groups', { headers: authHeaders() });
+    const data = await readJson(res); if (!res.ok) throw new Error(data.error || 'Failed to fetch groups'); return data;
+  },
+  async createScreenGroup(payload: { name: string; description?: string; screenIds: string[] }): Promise<ScreenGroup> {
+    const res = await fetch('/api/screen-groups', { method: 'POST', headers: authHeaders(), body: JSON.stringify(payload) });
+    const data = await readJson(res); if (!res.ok) throw new Error(data.error || 'Failed to create group'); return data;
+  },
+  async updateScreenGroup(id: string, payload: Partial<ScreenGroup>): Promise<ScreenGroup> {
+    const res = await fetch(`/api/screen-groups/${id}`, { method: 'PATCH', headers: authHeaders(), body: JSON.stringify(payload) });
+    const data = await readJson(res); if (!res.ok) throw new Error(data.error || 'Failed to update group'); return data;
+  },
+  async deleteScreenGroup(id: string): Promise<void> {
+    const res = await fetch(`/api/screen-groups/${id}`, { method: 'DELETE', headers: authHeaders() });
+    const data = await readJson(res); if (!res.ok) throw new Error(data.error || 'Failed to delete group');
+  },
+  async resolvePublishTargets(screenIds: string[], groupIds: string[]): Promise<{ uniqueCount: number; screens: Screen[] }> {
+    const res = await fetch('/api/publications/resolve-targets', { method: 'POST', headers: authHeaders(), body: JSON.stringify({ screenIds, groupIds }) });
+    const data = await readJson(res); if (!res.ok) throw new Error(data.error || 'Failed to resolve targets'); return data;
+  },
+  async createPublication(payload: { sourceScreenId: string; screenIds: string[]; groupIds: string[]; idempotencyKey: string }): Promise<PublishJob> {
+    const res = await fetch('/api/publications', { method: 'POST', headers: authHeaders(), body: JSON.stringify(payload) });
+    const data = await readJson(res); if (!res.ok) throw new Error(data.error || 'Failed to publish'); return data;
+  },
+  async getPublications(): Promise<PublishJob[]> {
+    const res = await fetch('/api/publications', { headers: authHeaders() });
+    const data = await readJson(res); if (!res.ok) throw new Error(data.error || 'Failed to fetch publish history'); return data;
+  },
+  async retryPublishTarget(jobId: string, targetId: string): Promise<void> {
+    const res = await fetch(`/api/publications/${jobId}/targets/${targetId}/retry`, { method: 'POST', headers: authHeaders() });
+    const data = await readJson(res); if (!res.ok) throw new Error(data.error || 'Retry failed');
+  },
+  async retryAllFailed(jobId: string): Promise<void> {
+    const res = await fetch(`/api/publications/${jobId}/retry-failed`, { method: 'POST', headers: authHeaders() });
+    const data = await readJson(res); if (!res.ok) throw new Error(data.error || 'Retry failed');
   },
 
   async getAuditLogs(): Promise<AuditLog[]> {

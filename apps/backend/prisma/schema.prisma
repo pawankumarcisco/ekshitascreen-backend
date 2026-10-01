@@ -35,6 +35,16 @@ enum SyncStatus {
   FAILED
 }
 
+enum PublishTargetStatus {
+  QUEUED
+  DOWNLOADING
+  VERIFYING
+  READY
+  PLAYING
+  FAILED
+  SUPERSEDED
+}
+
 model DashboardUser {
   id           String    @id @default(uuid())
   name         String
@@ -197,4 +207,118 @@ model AuditLog {
   createdAt DateTime       @default(now())
   user      DashboardUser? @relation(fields: [userId], references: [id], onDelete: SetNull)
   device    Device?        @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+}
+
+model ScreenGroup {
+  id          String   @id @default(uuid())
+  ownerId     String
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  createdBy   String
+  updatedBy   String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  members     ScreenGroupMember[]
+
+  @@index([ownerId, isActive])
+}
+
+model ScreenGroupMember {
+  id        String      @id @default(uuid())
+  groupId   String
+  screenId  String
+  createdBy String
+  createdAt DateTime    @default(now())
+  group     ScreenGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, screenId])
+  @@index([screenId])
+}
+
+model PublishJob {
+  id             String   @id @default(uuid())
+  ownerId        String
+  publisherId    String
+  idempotencyKey String
+  sourceScreenId String
+  contentVersion Int
+  playlistVersion Int
+  groupSnapshots Json
+  targetCount    Int
+  createdAt      DateTime @default(now())
+  targets        PublishJobTarget[]
+
+  @@unique([ownerId, idempotencyKey])
+  @@index([ownerId, createdAt])
+}
+
+model PublishJobTarget {
+  id                    String              @id @default(uuid())
+  jobId                 String
+  screenId              String
+  deviceId              String
+  screenNameSnapshot    String
+  targetVersion         Int
+  playlistVersion       Int
+  configurationVersion  Int
+  configurationSnapshot Json
+  manifestSnapshot      Json
+  status                PublishTargetStatus @default(QUEUED)
+  attemptId             String?
+  attemptNumber         Int                 @default(1)
+  totalBytes            BigInt
+  totalFiles            Int
+  bytesDownloaded       BigInt              @default(0)
+  filesCompleted        Int                 @default(0)
+  progressPercent       Int                 @default(0)
+  activeVersion         Int?
+  previousActiveVersion Int?
+  lastProgressAt        DateTime
+  errorCode             String?
+  errorMessage          String?
+  createdAt             DateTime            @default(now())
+  job                   PublishJob          @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  attempts              PublishAttempt[]
+
+  @@unique([jobId, screenId])
+  @@index([screenId, targetVersion])
+  @@index([jobId, status])
+  @@index([deviceId, status])
+}
+
+model PublishAttempt {
+  id               String              @id @default(uuid())
+  targetId         String
+  number           Int
+  status           PublishTargetStatus @default(QUEUED)
+  eventSequence    BigInt              @default(0)
+  bytesDownloaded BigInt              @default(0)
+  totalBytes       BigInt
+  filesCompleted   Int                 @default(0)
+  totalFiles       Int
+  progressPercent  Int                 @default(0)
+  currentFile      String?
+  errorCode        String?
+  errorMessage     String?
+  createdAt        DateTime            @default(now())
+  completedAt      DateTime?
+  target           PublishJobTarget    @relation(fields: [targetId], references: [id], onDelete: Restrict)
+  events           PublishEvent[]
+
+  @@unique([targetId, number])
+}
+
+model PublishEvent {
+  id            String              @id @default(uuid())
+  eventId       String
+  attemptId     String
+  eventSequence BigInt
+  status        PublishTargetStatus
+  details       Json
+  createdAt     DateTime            @default(now())
+  attempt       PublishAttempt      @relation(fields: [attemptId], references: [id], onDelete: Restrict)
+
+  @@unique([attemptId, eventId])
+  @@unique([attemptId, eventSequence])
 }

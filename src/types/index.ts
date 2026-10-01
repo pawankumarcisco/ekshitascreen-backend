@@ -5,6 +5,31 @@ export type ActivationStatus = 'PENDING' | 'ACTIVATED' | 'EXPIRED' | 'CANCELLED'
 export type PlaylistStatus = 'DRAFT' | 'PUBLISHED' | 'ARCHIVED';
 
 export type SyncStatus = 'PENDING' | 'DOWNLOADING' | 'VERIFYING' | 'APPLYING' | 'COMPLETED' | 'FAILED' | 'UP_TO_DATE';
+export type PublishStatus = 'QUEUED' | 'DOWNLOADING' | 'VERIFYING' | 'READY' | 'PLAYING' | 'FAILED' | 'SUPERSEDED';
+
+export interface ScreenGroup {
+  id: string; name: string; description?: string; ownerId: string; isActive: boolean;
+  screenIds: string[]; totalScreens: number; onlineScreens: number; offlineScreens: number;
+  createdAt: string; updatedAt: string;
+}
+
+export interface PublishAttempt {
+  id: string; targetId: string; number: number; status: PublishStatus; progressPercent: number;
+  bytesDownloaded: number; totalBytes: number; filesCompleted: number; totalFiles: number;
+  currentFile?: string | null; errorCode?: string | null; errorMessage?: string | null; createdAt: string;
+}
+
+export interface PublishTarget {
+  id: string; jobId: string; screenId: string; screenNameSnapshot: string; targetVersion: number;
+  activeVersion?: number | null; status: PublishStatus; progressPercent: number; filesCompleted: number;
+  totalFiles: number; lastProgressAt: string; errorMessage?: string | null; attempts: PublishAttempt[];
+  screen?: Screen;
+}
+
+export interface PublishJob {
+  id: string; publisherName: string; sourceScreenId: string; contentVersion: number; playlistVersion: number;
+  targetCount: number; createdAt: string; targets: PublishTarget[]; counts: Record<string, number>;
+}
 
 export type Orientation = 'LANDSCAPE' | 'PORTRAIT';
 
@@ -113,6 +138,9 @@ export interface Screen {
   itemCount?: number;
   syncStatus?: SyncStatus;
   appliedVersion?: number;
+  desiredVersion?: number;
+  activeVersion?: number;
+  groupIds?: string[];
   lastSeenAt?: string | null;
 }
 

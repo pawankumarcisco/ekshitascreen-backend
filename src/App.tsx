@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Navbar } from './components/Navbar';
 import { ScreenList } from './components/ScreenList';
+import { GroupsPublishPanel } from './components/GroupsPublishPanel';
 import { ScreenDetail } from './components/ScreenDetail';
 import { MediaLibrary } from './components/MediaLibrary';
 import { SystemNetwork } from './components/SystemNetwork';
@@ -24,6 +25,7 @@ export function App() {
   const [checkingSession, setCheckingSession] = useState(true);
 
   const [screens, setScreens] = useState<Screen[]>([]);
+  const [screenFilterIds, setScreenFilterIds] = useState<string[] | null>(null);
   const [mediaAssets, setMediaAssets] = useState<MediaAsset[]>([]);
   const [loading, setLoading] = useState(false);
   const [isServerOnline, setIsServerOnline] = useState(true);
@@ -242,15 +244,17 @@ export function App() {
                 mediaAssets={mediaAssets}
               />
             ) : (
+              <>
+              <GroupsPublishPanel screens={screens} onFilter={setScreenFilterIds} />
               <ScreenList
-                screens={screens}
+                screens={screenFilterIds ? screens.filter(screen => screenFilterIds.includes(screen.id)) : screens}
                 loading={loading}
                 onSelectScreen={(screenId) => setSelectedScreenId(screenId)}
                 onRefresh={loadData}
                 canUnregister={user.role === 'ADMIN'}
                 onUnregister={async (screen) => { await api.unregisterScreen(screen.id); await loadData(); }}
                 onRenew={async (screen) => { await api.renewScreen(screen.id); await loadData(); }}
-              />
+              /></>
             )}
           </div>
         )}
