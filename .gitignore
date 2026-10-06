@@ -8,6 +8,7 @@ node_modules/
 **/node_modules/
 
 # Generated builds and test output
+apps/
 dist/
 build/
 out/
@@ -66,3 +67,6 @@ Desktop.ini
 .vercel/
 .netlify/
 .codex-temp/
+
+# Android player is maintained as a sibling project, not in this dashboard repository
+/apps/android-player/

@@ -8,6 +8,7 @@ import {
 } from '../types';
 import type { ScreenGroup, PublishJob } from '../types';
 import type { ContentPlaylist, ContentLayout, ContentSchedule } from '../types';
+import type { DeviceCommand } from '../types';
 
 let authToken: string | null = localStorage.getItem('screencast_token');
 
@@ -265,6 +266,9 @@ export const api = {
   async saveGeneralSettingsDraft(scope:string,scopeId:string,overrides:Record<string,any>):Promise<any>{const r=await fetch('/api/general-settings/draft',{method:'PUT',headers:authHeaders(),body:JSON.stringify({scope,scopeId,overrides})});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d;},
   async resetGeneralSettings(scope:string,scopeId:string):Promise<any>{const r=await fetch('/api/general-settings/reset',{method:'POST',headers:authHeaders(),body:JSON.stringify({scope,scopeId})});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d;},
   async publishGeneralSettings(scope:string,scopeId:string):Promise<any>{const r=await fetch('/api/general-settings/publish',{method:'POST',headers:authHeaders(),body:JSON.stringify({scope,scopeId,idempotencyKey:crypto.randomUUID()})});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d;},
+  async getGeneralSettingsPublication(id:string):Promise<any>{const r=await fetch(`/api/general-settings/publications/${encodeURIComponent(id)}`,{headers:authHeaders()});const d=await readJson(r);if(!r.ok)throw new Error(d.error||'Failed to fetch configuration delivery status');return d;},
+  async createDeviceCommand(screenId:string,commandType:'RESTART_APP'|'REBOOT_DEVICE'):Promise<DeviceCommand>{const r=await fetch(`/api/screens/${encodeURIComponent(screenId)}/commands`,{method:'POST',headers:authHeaders(),body:JSON.stringify({commandType})});const d=await readJson(r);if(!r.ok)throw new Error(d.error||'Failed to send device command');return d;},
+  async getDeviceCommand(screenId:string,commandId:string):Promise<DeviceCommand>{const r=await fetch(`/api/screens/${encodeURIComponent(screenId)}/commands/${encodeURIComponent(commandId)}`,{headers:authHeaders()});const d=await readJson(r);if(!r.ok)throw new Error(d.error||'Failed to read device command');return d;},
   async assignPlaylist(screenId:string,playlistId:string|null):Promise<any>{const r=await fetch(`/api/screens/${screenId}/playlist-assignment`,{method:'PUT',headers:authHeaders(),body:JSON.stringify({playlistId})});const d=await readJson(r);if(!r.ok)throw new Error(d.error);return d;},
   async publishAssignedPlaylist(screenId:string,playlistId:string):Promise<PublishJob>{return this.createPublication({sourceScreenId:screenId,screenIds:[screenId],groupIds:[],playlistId,idempotencyKey:crypto.randomUUID()});},
 

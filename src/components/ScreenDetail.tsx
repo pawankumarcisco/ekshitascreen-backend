@@ -12,9 +12,10 @@ import {
   CheckCircle,
   AlertTriangle,
   Monitor,
-  Send
+  Send,
+  Power
 } from 'lucide-react';
-import { Screen, ScreenConfiguration, Playlist, MediaAsset } from '../types';
+import { Screen, ScreenConfiguration, Playlist, MediaAsset, DeviceCommand } from '../types';
 import { PlaylistEditor } from './PlaylistEditor';
 import { api } from '../services/api';
 
@@ -38,7 +39,10 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
   const [loading, setLoading] = useState(true);
   const [configSaving, setConfigSaving] = useState(false);
   const [configPublishing, setConfigPublishing] = useState(false);
-  const [configPublishMessage, setConfigPublishMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [configPublishMessage, setConfigPublishMessage] = useState<{ type: 'success' | 'error' | 'pending'; text: string } | null>(null);
+  const [configPublicationId, setConfigPublicationId] = useState<string | null>(null);
+  const [deviceCommand, setDeviceCommand] = useState<DeviceCommand | null>(null);
+  const [commandError, setCommandError] = useState<string | null>(null);
   const [activeSlideIndex, setActiveSlideIndex] = useState(0);
   const [previewPlaying, setPreviewPlaying] = useState(true);
 
@@ -67,6 +71,47 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
   useEffect(() => {
     fetchScreenData();
   }, [screenId]);
+
+  useEffect(() => {
+    if (!configPublicationId) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const publication = await api.getGeneralSettingsPublication(configPublicationId);
+        const target = publication.targets?.find((item: any) => item.screenId === screenId);
+        if (cancelled || !target) return;
+        if (target.status === 'APPLIED' && target.appliedVersion === target.desiredVersion) {
+          setConfigPublishMessage({ type: 'success', text: `Configuration v${target.desiredVersion} applied on ${screen?.name || 'the connected screen'}.` });
+          setConfigPublicationId(null);
+        } else if (target.status === 'FAILED') {
+          setConfigPublishMessage({ type: 'error', text: target.errorMessage || 'The Android player could not apply this configuration.' });
+          setConfigPublicationId(null);
+        } else {
+          setConfigPublishMessage({ type: 'pending', text: `Published v${target.desiredVersion} for ${screen?.name || 'this screen'}. Waiting for Android acknowledgement (${String(target.status || 'PENDING').toLowerCase()}).` });
+        }
+      } catch (error) {
+        if (!cancelled) setConfigPublishMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to read device acknowledgement.' });
+      }
+    };
+    poll();
+    const timer = window.setInterval(poll, 3000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [configPublicationId, screenId, screen?.name]);
+
+  useEffect(() => {
+    if (!deviceCommand || ['COMPLETED', 'FAILED', 'EXPIRED'].includes(deviceCommand.status)) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const latest = await api.getDeviceCommand(screenId, deviceCommand.id);
+        if (!cancelled) setDeviceCommand(latest);
+      } catch (error) {
+        if (!cancelled) setCommandError(error instanceof Error ? error.message : 'Failed to read command status.');
+      }
+    };
+    const timer = window.setInterval(poll, 2000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [screenId, deviceCommand?.id, deviceCommand?.status]);
 
   // Slideshow preview interval runner
   const activeItems = (
@@ -132,10 +177,11 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
 
       await api.saveGeneralSettingsDraft('SCREEN', screenId, overrides);
       const publication = await api.publishGeneralSettings('SCREEN', screenId);
-      const targetCount = publication.targets?.length || 0;
+      const target = publication.targets?.find((item: any) => item.screenId === screenId);
+      setConfigPublicationId(publication.id);
       setConfigPublishMessage({
-        type: 'success',
-        text: `Published to ${targetCount} Android player${targetCount === 1 ? '' : 's'}.`
+        type: 'pending',
+        text: `Published v${target?.desiredVersion || '—'} for ${screen?.name || 'this screen'}. Waiting for Android acknowledgement.`
       });
     } catch (error) {
       setConfigPublishMessage({
@@ -145,6 +191,15 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
     } finally {
       setConfigPublishing(false);
     }
+  };
+
+  const handleDeviceCommand = async (commandType: 'RESTART_APP' | 'REBOOT_DEVICE') => {
+    if (!screen) return;
+    const action = commandType === 'RESTART_APP' ? 'Restart EkshitaScreen' : 'Restart';
+    if (!window.confirm(`${action} on ${screen.name}${commandType === 'REBOOT_DEVICE' ? ' device' : ''}?`)) return;
+    setCommandError(null);
+    try { setDeviceCommand(await api.createDeviceCommand(screenId, commandType)); }
+    catch (error) { setCommandError(error instanceof Error ? error.message : 'Failed to send command.'); }
   };
 
   const handleSaveDraft = async (items: any[]) => {
@@ -213,7 +268,7 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
                 </div>
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
-                {screen.location ? `${screen.location} Â· ` : ''}Device UID: <span className="font-mono">{screen.device?.deviceUid}</span>
+                {screen.location ? `${screen.location} · ` : ''}Device UID: <span className="font-mono">{screen.device?.deviceUid}</span>
               </p>
             </div>
           </div>
@@ -226,8 +281,25 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
               <RefreshCw className="w-3.5 h-3.5" />
               <span>Refresh Status</span>
             </button>
+            <button
+              onClick={() => handleDeviceCommand('RESTART_APP')}
+              disabled={Boolean(deviceCommand && !['COMPLETED', 'FAILED', 'EXPIRED'].includes(deviceCommand.status))}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 bg-white hover:bg-slate-50 rounded-lg border border-slate-200 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <RotateCw className="w-3.5 h-3.5" /><span>Restart App</span>
+            </button>
+            <button
+              onClick={() => handleDeviceCommand('REBOOT_DEVICE')}
+              disabled={Boolean(deviceCommand && !['COMPLETED', 'FAILED', 'EXPIRED'].includes(deviceCommand.status))}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-rose-600 hover:text-rose-700 bg-white hover:bg-rose-50 rounded-lg border border-slate-200 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Power className="w-3.5 h-3.5" /><span>Restart Device</span>
+            </button>
           </div>
         </div>
+        {(deviceCommand || commandError) && <div className={`mt-4 rounded-lg px-3 py-2 text-xs ${deviceCommand?.status === 'COMPLETED' ? 'bg-emerald-50 text-emerald-700' : deviceCommand && ['FAILED','EXPIRED'].includes(deviceCommand.status) || commandError ? 'bg-rose-50 text-rose-700' : 'bg-sky-50 text-sky-700'}`}>
+          {commandError || (deviceCommand?.status === 'COMPLETED' ? 'Device command completed.' : deviceCommand?.status === 'FAILED' ? (deviceCommand.errorMessage || 'Device command failed.') : deviceCommand?.status === 'EXPIRED' ? 'Device command timed out.' : `${deviceCommand?.commandType === 'REBOOT_DEVICE' ? 'Device restart' : 'App restart'}: ${String(deviceCommand?.status || 'PENDING').toLowerCase()}.`)}
+        </div>}
       </div>
 
 
@@ -330,14 +402,14 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
                   className="inline-flex items-center gap-1 rounded-md bg-sky-600 px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {configPublishing ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Send className="w-3 h-3" />}
-                  {configPublishing ? 'Publishing...' : 'Publish'}
+                  {configPublishing ? 'Publishing...' : 'Publish & Apply'}
                 </button>
               </div>
             </div>
 
             {configPublishMessage && (
-              <div className={`mb-3 flex items-center gap-1.5 rounded-md px-2.5 py-2 text-[11px] ${configPublishMessage.type === 'success' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>
-                {configPublishMessage.type === 'success' ? <CheckCircle className="w-3.5 h-3.5 shrink-0" /> : <AlertTriangle className="w-3.5 h-3.5 shrink-0" />}
+              <div className={`mb-3 flex items-center gap-1.5 rounded-md px-2.5 py-2 text-[11px] ${configPublishMessage.type === 'success' ? 'bg-emerald-50 text-emerald-700' : configPublishMessage.type === 'pending' ? 'bg-sky-50 text-sky-700' : 'bg-rose-50 text-rose-700'}`}>
+                {configPublishMessage.type === 'success' ? <CheckCircle className="w-3.5 h-3.5 shrink-0" /> : configPublishMessage.type === 'pending' ? <RefreshCw className="w-3.5 h-3.5 shrink-0 animate-spin" /> : <AlertTriangle className="w-3.5 h-3.5 shrink-0" />}
                 <span>{configPublishMessage.text}</span>
               </div>
             )}
@@ -354,9 +426,9 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
                   }}
                   className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-slate-800 font-mono focus:outline-none focus:ring-1 focus:ring-sky-500"
                 >
-                  <option value="1920x1080">1920 Ã— 1080 (Full HD 1080p - Recommended)</option>
-                  <option value="1280x720">1280 Ã— 720 (HD 720p)</option>
-                  <option value="3840x2160">3840 Ã— 2160 (Ultra HD 4K)</option>
+                  <option value="1920x1080">1920 × 1080 (Full HD 1080p - Recommended)</option>
+                  <option value="1280x720">1280 × 720 (HD 720p)</option>
+                  <option value="3840x2160">3840 × 2160 (Ultra HD 4K)</option>
                 </select>
               </div>
 
@@ -381,10 +453,10 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
                     onChange={(e) => handleConfigChange({ rotation: Number(e.target.value) })}
                     className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-slate-800 font-mono focus:outline-none focus:ring-1 focus:ring-sky-500"
                   >
-                    <option value="0">0Â° (Standard)</option>
-                    <option value="90">90Â° Clockwise</option>
-                    <option value="180">180Â° Inverted</option>
-                    <option value="270">270Â° Counter-Clockwise</option>
+                    <option value="0">0° (Standard)</option>
+                    <option value="90">90° Clockwise</option>
+                    <option value="180">180° Inverted</option>
+                    <option value="270">270° Counter-Clockwise</option>
                   </select>
                 </div>
               </div>
@@ -495,7 +567,10 @@ export const ScreenDetail: React.FC<ScreenDetailProps> = ({
           </div>
 
           <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400 font-mono">
-            Config revision: #{config?.version || 1} Â· Last updated: {new Date(config?.updatedAt || Date.now()).toLocaleTimeString()}
+            <div>Config revision: #{config?.version || 1} · Last updated: {new Date(config?.updatedAt || Date.now()).toLocaleTimeString()}</div>
+            {screen.configurationDelivery && <div className={`mt-1 ${screen.configurationDelivery.status === 'APPLIED' && screen.configurationDelivery.appliedVersion === screen.configurationDelivery.desiredVersion ? 'text-emerald-600' : screen.configurationDelivery.status === 'FAILED' ? 'text-rose-600' : 'text-sky-600'}`}>
+              Published v{screen.configurationDelivery.desiredVersion} · Device applied v{screen.configurationDelivery.appliedVersion} · {screen.configurationDelivery.status === 'APPLIED' ? 'Up to date' : screen.configurationDelivery.status === 'FAILED' ? 'Failed' : 'Waiting for device'}
+            </div>}
           </div>
         </div>
       </div>

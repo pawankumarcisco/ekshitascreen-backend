@@ -6,6 +6,8 @@ export type PlaylistStatus = 'DRAFT' | 'PUBLISHED' | 'ARCHIVED';
 
 export type SyncStatus = 'PENDING' | 'DOWNLOADING' | 'VERIFYING' | 'APPLYING' | 'COMPLETED' | 'FAILED' | 'UP_TO_DATE';
 export type PublishStatus = 'QUEUED' | 'HELD' | 'DOWNLOADING' | 'VERIFYING' | 'READY' | 'PLAYING' | 'FAILED' | 'SUPERSEDED' | 'CANCELLED';
+export type DeviceCommandStatus = 'PENDING' | 'DELIVERED' | 'ACKNOWLEDGED' | 'EXECUTING' | 'COMPLETED' | 'FAILED' | 'EXPIRED';
+export interface DeviceCommand { id:string; screenId:string; deviceId:string; commandType:'RESTART_APP'|'REBOOT_DEVICE'; status:DeviceCommandStatus; requestedAt:string; deliveredAt?:string|null; acknowledgedAt?:string|null; executingAt?:string|null; completedAt?:string|null; failedAt?:string|null; errorCode?:string|null; errorMessage?:string|null; }
 
 export interface ScreenGroup {
   id: string; name: string; description?: string; ownerId: string; isActive: boolean;
@@ -150,6 +152,7 @@ export interface Screen {
   assignedPlaylist?: ContentPlaylist|null;
   unpublishedChanges?: boolean;
   latestSync?: DeviceSyncRecord;
+  configurationDelivery?: { desiredVersion:number; receivedVersion:number; appliedVersion:number; status:'PENDING'|'RECEIVED'|'APPLIED'|'FAILED'; lastSeenAt?:string|null; lastAppliedAt?:string|null; errorMessage?:string|null } | null;
   lastSeenAt?: string | null;
 }
 

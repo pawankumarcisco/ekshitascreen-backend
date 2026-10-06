@@ -80,6 +80,7 @@ interface DBState {
   generalSettingsRevisions: any[];
   settingsPublications: any[];
   deviceSettings: any[];
+  deviceCommands: any[];
 }
 
 function loadDB(): DBState {
@@ -139,6 +140,7 @@ function loadDB(): DBState {
     ,generalSettingsRevisions: []
     ,settingsPublications: []
     ,deviceSettings: []
+    ,deviceCommands: []
   };
 
   saveDB(initialDB);
@@ -169,7 +171,7 @@ let db = loadDB();
 function normalizeState(state: DBState): boolean {
   let changed = false;
   // Additive state migration for installations created before groups/publications.
-  for (const key of ['screenGroups', 'screenGroupMembers', 'publishJobs', 'publishTargets', 'publishAttempts', 'publishEvents', 'layouts', 'schedules', 'playbackSettings', 'cleanupRuns', 'generalSettingsDrafts', 'generalSettingsRevisions', 'settingsPublications', 'deviceSettings'] as const) {
+  for (const key of ['screenGroups', 'screenGroupMembers', 'publishJobs', 'publishTargets', 'publishAttempts', 'publishEvents', 'layouts', 'schedules', 'playbackSettings', 'cleanupRuns', 'generalSettingsDrafts', 'generalSettingsRevisions', 'settingsPublications', 'deviceSettings', 'deviceCommands'] as const) {
     if (!Array.isArray(state[key])) { state[key] = []; changed = true; }
   }
   return changed;
@@ -1009,6 +1011,21 @@ function effectiveGeneralSettings(screen:any){
   for(const [scope,scopeId] of layers){const overrides=publishedOverrides(scope,scopeId);for(const key of Object.keys(overrides)){if(GENERAL_SETTINGS_KEYS.has(key)){effective[key]=overrides[key];sources[key]=scope;}}}
   return {values:effective,sources};
 }
+function devicePlayerConfiguration(screen:any, fallback:any){
+  const delivery=db.deviceSettings.find(s=>s.deviceId===screen.deviceId);
+  const values=delivery?.effective?.values||effectiveGeneralSettings(screen).values;
+  const fitMode=values.imageFit==='COVER'?'FILL':values.imageFit==='STRETCH'?'STRETCH':'FIT';
+  return {
+    ...fallback,
+    width:Number(values.resolutionWidth??fallback.width??1920),height:Number(values.resolutionHeight??fallback.height??1080),
+    rotation:Number(values.contentRotation??fallback.rotation??0),orientation:String(values.orientation??fallback.orientation??'LANDSCAPE'),
+    fitMode,intervalSeconds:Number(values.defaultSlideDurationSeconds??fallback.intervalSeconds??10),
+    transition:String(values.transition??fallback.transition??'FADE'),transitionDurationMs:Number(values.transitionDurationMs??fallback.transitionDurationMs??400),
+    loop:Boolean(values.repeatPlaylist??fallback.loop??true),shuffle:(values.playbackOrder??(fallback.shuffle?'SHUFFLE':'PLAYLIST_ORDER'))==='SHUFFLE',
+    autoStart:Boolean(values.startOnBoot??fallback.autoStart??true),version:Number(delivery?.desiredVersion??fallback.version??1)
+  };
+}
+function devicePublishVersion(mediaVersion:number,configVersion:number){return mediaVersion*100000+configVersion;}
 function assertSettingsScopeAccess(req:any,res:Response,scope:string,scopeId:string){
   if(scope==='COMMON')return true;
   if(scope==='SCREEN'){const screen=db.screens.find(s=>s.id===scopeId);if(!screen||!canAccessScreen(req.user,screen)){res.status(403).json({error:'Access denied'});return false;}return true;}
@@ -1348,6 +1365,7 @@ app.get('/api/screens/:id', authMiddleware, (req: any, res: Response) => {
     publishedVersion: publishedPlaylist ? publishedPlaylist.version : 0,
     hasDraftChanges: Boolean(draftPlaylist),
     latestSync,
+    configurationDelivery: db.deviceSettings.find(s => s.deviceId === screen.deviceId) || null,
     assignedPlaylist: db.playlists.find(p=>p.id===screen.assignedPlaylistId&&!p.deletedAt)||null,
     unpublishedChanges: Boolean(screen.assignedPlaylistId && (!db.publishJobs.filter(j=>j.sourceScreenId===screen.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt))[0] || new Date(screen.assignmentUpdatedAt||0)>new Date(db.publishJobs.filter(j=>j.sourceScreenId===screen.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt))[0]?.createdAt||0) || new Date(db.playlists.find(p=>p.id===screen.assignedPlaylistId)?.updatedAt||0)>new Date(db.publishJobs.filter(j=>j.sourceScreenId===screen.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt))[0]?.createdAt||0)))
   });
@@ -1370,6 +1388,32 @@ app.patch('/api/screens/:id', authMiddleware, (req: any, res: Response) => {
   broadcastEvent('SCREEN_UPDATED', { screenId: screen.id });
 
   res.json(screen);
+});
+
+app.post('/api/screens/:id/commands', authMiddleware, (req: any, res: Response) => {
+  const screen = db.screens.find(s => s.id === req.params.id);
+  if (!screen) return res.status(404).json({ error: 'Screen not found' });
+  if (!canAccessScreen(req.user, screen) || req.user.role === 'VIEWER') return res.status(403).json({ error: 'Device control permission required' });
+  const commandType = String(req.body.commandType || '').toUpperCase();
+  if (!['RESTART_APP', 'REBOOT_DEVICE'].includes(commandType)) return res.status(400).json({ error: 'Unsupported device command' });
+  const existing = db.deviceCommands.find(c => c.screenId === screen.id && c.commandType === commandType && !['COMPLETED', 'FAILED', 'EXPIRED'].includes(c.status));
+  if (existing) return res.status(409).json({ error: 'This command is already pending', command: existing });
+  const now = new Date().toISOString();
+  const command = { id: 'cmd-' + crypto.randomUUID(), screenId: screen.id, deviceId: screen.deviceId, commandType, status: 'PENDING', requestedBy: req.user.id, requestedAt: now, deliveredAt: null, acknowledgedAt: null, executingAt: null, completedAt: null, failedAt: null, expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(), errorCode: null, errorMessage: null };
+  db.deviceCommands.push(command); saveDB(db);
+  notifyDevice(screen.deviceId, 'DEVICE_COMMAND_AVAILABLE', { commandId: command.id, commandType });
+  logAudit(req.user.id, screen.deviceId, commandType === 'RESTART_APP' ? 'DEVICE_RESTART_APP_REQUESTED' : 'DEVICE_REBOOT_REQUESTED', { screenId: screen.id, commandId: command.id });
+  broadcastEvent('DEVICE_COMMAND_UPDATED', { screenId: screen.id, commandId: command.id, status: command.status });
+  res.status(201).json(command);
+});
+
+app.get('/api/screens/:id/commands/:commandId', authMiddleware, (req: any, res: Response) => {
+  const screen = db.screens.find(s => s.id === req.params.id);
+  if (!screen) return res.status(404).json({ error: 'Screen not found' });
+  if (!canAccessScreen(req.user, screen)) return res.status(403).json({ error: 'Access denied' });
+  const command = db.deviceCommands.find(c => c.id === req.params.commandId && c.screenId === screen.id);
+  if (!command) return res.status(404).json({ error: 'Device command not found' });
+  res.json(command);
 });
 
 app.delete('/api/screens/:id/unregister', authMiddleware, adminMiddleware, (req: any, res: Response) => {
@@ -1875,6 +1919,8 @@ app.get('/api/device/manifest', deviceAuthMiddleware, (req: any, res: Response) 
     .filter(t => t.deviceId === deviceId && !['SUPERSEDED', 'CANCELLED', 'PLAYING'].includes(t.status))
     .sort((a, b) => b.targetVersion - a.targetVersion)[0];
   if (desiredTarget) {
+    const playerConfiguration=devicePlayerConfiguration(screen,desiredTarget.configurationSnapshot||{});
+    const configVersion=playerConfiguration.version,mediaVersion=Number(desiredTarget.playlistVersion||desiredTarget.targetVersion||0);
     return res.json({
       publishJobId: desiredTarget.jobId,
       targetId: desiredTarget.id,
@@ -1883,7 +1929,8 @@ app.get('/api/device/manifest', deviceAuthMiddleware, (req: any, res: Response) 
       screenId: screen.id,
       playlistVersion: desiredTarget.playlistVersion,
       configurationVersion: desiredTarget.configurationVersion,
-      screenConfiguration: desiredTarget.configurationSnapshot,
+      publishVersion:devicePublishVersion(mediaVersion,configVersion),configVersion,mediaVersion,
+      screenConfiguration: playerConfiguration,configuration:playerConfiguration,
       layout: desiredTarget.layoutSnapshot || null,
       settings: desiredTarget.settingsSnapshot || DEFAULT_PLAYBACK_SETTINGS,
       schedules: desiredTarget.scheduleSnapshot || [],
@@ -1914,11 +1961,13 @@ app.get('/api/device/manifest', deviceAuthMiddleware, (req: any, res: Response) 
     .sort((a, b) => b.version - a.version)[0];
 
   if (!published) {
+    const playerConfiguration=devicePlayerConfiguration(screen,config),configVersion=playerConfiguration.version,mediaVersion=0;
     return res.json({
       screenId: screen.id,
       playlistVersion: 0,
-      configurationVersion: config.version,
-      screenConfiguration: config,
+      configurationVersion: configVersion,
+      publishVersion:devicePublishVersion(mediaVersion,configVersion),configVersion,mediaVersion,
+      screenConfiguration: playerConfiguration,configuration:playerConfiguration,
       items: []
     });
   }
@@ -1943,11 +1992,13 @@ app.get('/api/device/manifest', deviceAuthMiddleware, (req: any, res: Response) 
     })
     .filter(Boolean);
 
+  const playerConfiguration=devicePlayerConfiguration(screen,config),configVersion=playerConfiguration.version,mediaVersion=published.version;
   res.json({
     screenId: screen.id,
     playlistVersion: published.version,
-    configurationVersion: config.version,
-    screenConfiguration: config,
+    configurationVersion: configVersion,
+    publishVersion:devicePublishVersion(mediaVersion,configVersion),configVersion,mediaVersion,
+    screenConfiguration: playerConfiguration,configuration:playerConfiguration,
     items
   });
 });
@@ -1999,6 +2050,36 @@ app.get('/api/device/media/:assetId', deviceAuthMiddleware, async (req: Request,
 // -------------------------------------------------------------
 // 10. DEVICE HEARTBEAT & SYNC STATUS
 // -------------------------------------------------------------
+app.get('/api/device/commands', deviceAuthMiddleware, (req: any, res: Response) => {
+  const now = Date.now(); let changed = false;
+  for (const command of db.deviceCommands.filter(c => c.deviceId === req.device.deviceId && !['COMPLETED', 'FAILED', 'EXPIRED'].includes(c.status))) {
+    if (new Date(command.expiresAt).getTime() <= now) { command.status = 'EXPIRED'; command.failedAt = new Date().toISOString(); command.errorCode = 'COMMAND_EXPIRED'; command.errorMessage = 'Device did not receive the command before it expired'; changed = true; }
+    else if (command.status === 'PENDING') { command.status = 'DELIVERED'; command.deliveredAt = new Date().toISOString(); changed = true; }
+  }
+  if (changed) saveDB(db);
+  res.json(db.deviceCommands.filter(c => c.deviceId === req.device.deviceId && ['DELIVERED', 'ACKNOWLEDGED', 'EXECUTING'].includes(c.status)).map(c => ({ commandId: c.id, commandType: c.commandType, requestedAt: c.requestedAt, expiresAt: c.expiresAt, status: c.status })));
+});
+
+app.post('/api/device/commands/:id/ack', deviceAuthMiddleware, (req: any, res: Response) => {
+  const command = db.deviceCommands.find(c => c.id === req.params.id && c.deviceId === req.device.deviceId);
+  if (!command) return res.status(404).json({ error: 'Device command not found' });
+  if (['COMPLETED', 'FAILED', 'EXPIRED'].includes(command.status)) return res.json(command);
+  const status = String(req.body.status || '').toUpperCase();
+  if (!['ACKNOWLEDGED', 'EXECUTING'].includes(status)) return res.status(400).json({ error: 'Invalid acknowledgement status' });
+  const now = new Date().toISOString(); command.status = status; command.acknowledgedAt ||= now; if (status === 'EXECUTING') command.executingAt ||= now;
+  saveDB(db); broadcastEvent('DEVICE_COMMAND_UPDATED', { screenId: command.screenId, commandId: command.id, status }); res.json(command);
+});
+
+app.post('/api/device/commands/:id/complete', deviceAuthMiddleware, (req: any, res: Response) => {
+  const command = db.deviceCommands.find(c => c.id === req.params.id && c.deviceId === req.device.deviceId);
+  if (!command) return res.status(404).json({ error: 'Device command not found' });
+  if (['COMPLETED', 'FAILED'].includes(command.status)) return res.json(command);
+  const status = String(req.body.status || '').toUpperCase();
+  if (!['COMPLETED', 'FAILED'].includes(status)) return res.status(400).json({ error: 'Invalid completion status' });
+  const now = new Date().toISOString(); Object.assign(command, { status, completedAt: status === 'COMPLETED' ? now : null, failedAt: status === 'FAILED' ? now : null, errorCode: status === 'FAILED' ? String(req.body.errorCode || 'DEVICE_COMMAND_FAILED') : null, errorMessage: status === 'FAILED' ? String(req.body.errorMessage || 'Device command failed') : null });
+  saveDB(db); logAudit(null, command.deviceId, status === 'COMPLETED' ? 'DEVICE_COMMAND_COMPLETED' : 'DEVICE_COMMAND_FAILED', { commandId: command.id, commandType: command.commandType, errorCode: command.errorCode, errorMessage: command.errorMessage }); broadcastEvent('DEVICE_COMMAND_UPDATED', { screenId: command.screenId, commandId: command.id, status }); res.json(command);
+});
+
 app.post('/api/device/heartbeat', deviceAuthMiddleware, (req: any, res: Response) => {
   const { appVersion, playbackStatus, appliedVersion, freeStorageBytes } = req.body;
   const deviceId = req.device.deviceId;
