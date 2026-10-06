@@ -230,9 +230,8 @@ export const MediaLibrary: React.FC<MediaLibraryProps> = ({
 
       {/* Assets Grid */}
       <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-xs">
-        <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between text-xs text-slate-500">
+        <div className="px-6 py-4 border-b border-slate-100 text-xs text-slate-500">
           <span>Total assets: <strong className="text-slate-700">{filteredAssets.length}</strong></span>
-          <span className="font-mono">Local storage: /storage/media</span>
         </div>
 
         {filteredAssets.length === 0 ? (

@@ -1640,7 +1640,13 @@ app.delete('/api/media/:id', authMiddleware, async (req: any, res: Response) => 
   // Remove from ImageKit or the local development filesystem.
   try {
     if (asset.imageKitFileId && imageKit) {
-      await imageKit.files.delete(asset.imageKitFileId);
+      try {
+        await imageKit.files.delete(asset.imageKitFileId);
+      } catch (err: any) {
+        // Deleting an already-missing object is successful from the app's
+        // perspective. Continue so stale metadata can be removed as well.
+        if (err?.status !== 404) throw err;
+      }
     } else {
       const filePath = path.join(MEDIA_DIR, asset.storageKey);
       const thumbPath = path.join(THUMBNAILS_DIR, asset.storageKey);
@@ -1696,8 +1702,8 @@ app.get('/api/screens/:id/playlist', authMiddleware, (req: any, res: Response) =
           ...i,
           mediaAsset: asset ? {
             ...asset,
-            url: `/storage/media/${asset.storageKey}`,
-            thumbnailUrl: `/storage/thumbnails/${asset.storageKey}`
+            url: asset.url || `/storage/media/${asset.storageKey}`,
+            thumbnailUrl: asset.thumbnailUrl || `/storage/thumbnails/${asset.storageKey}`
           } : null
         };
       });
