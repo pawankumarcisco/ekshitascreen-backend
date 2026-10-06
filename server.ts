@@ -39,6 +39,9 @@ const STORAGE_ROOT = path.resolve(process.cwd(), 'storage');
 const MEDIA_DIR = path.join(STORAGE_ROOT, 'media');
 const THUMBNAILS_DIR = path.join(STORAGE_ROOT, 'thumbnails');
 const DOWNLOADS_DIR = path.join(STORAGE_ROOT, 'downloads');
+const ANDROID_APK_FILENAME = process.env.ANDROID_APK_FILENAME || 'ekshitascreen-player.apk';
+const ANDROID_APK_VERSION_CODE = Number(process.env.ANDROID_APK_VERSION_CODE || 4);
+const ANDROID_APK_VERSION_NAME = process.env.ANDROID_APK_VERSION_NAME || '1.2.0';
 const DATA_FILE = path.join(STORAGE_ROOT, 'screencast-db.json');
 
 if (!fs.existsSync(STORAGE_ROOT)) fs.mkdirSync(STORAGE_ROOT, { recursive: true });
@@ -2180,6 +2183,41 @@ app.get('/api/audit', authMiddleware, (req: Request, res: Response) => {
 // -------------------------------------------------------------
 // 12. DOWNLOAD PACKAGES FOR LOCAL SETUP
 // -------------------------------------------------------------
+app.get('/api/device/app-update', deviceAuthMiddleware, (req: any, res: Response) => {
+  const currentVersionCode = Math.max(0, Number(req.query.versionCode || 0));
+  const filePath = path.join(DOWNLOADS_DIR, ANDROID_APK_FILENAME);
+  if (!fs.existsSync(filePath)) {
+    return res.json({ updateAvailable: false, currentVersionCode, reason: 'NO_RELEASE_PUBLISHED' });
+  }
+
+  const fileBuffer = fs.readFileSync(filePath);
+  const sha256 = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+  const size = fileBuffer.length;
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    updateAvailable: ANDROID_APK_VERSION_CODE > currentVersionCode,
+    currentVersionCode,
+    versionCode: ANDROID_APK_VERSION_CODE,
+    versionName: ANDROID_APK_VERSION_NAME,
+    size,
+    sha256,
+    downloadUrl: '/api/device/app-update/download',
+    mandatory: false,
+    publishedAt: fs.statSync(filePath).mtime.toISOString()
+  });
+});
+
+app.get('/api/device/app-update/download', deviceAuthMiddleware, (req: any, res: Response) => {
+  const filePath = path.join(DOWNLOADS_DIR, ANDROID_APK_FILENAME);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'No Android player update is published' });
+  const stat = fs.statSync(filePath);
+  res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+  res.setHeader('Content-Length', stat.size);
+  res.setHeader('Content-Disposition', `attachment; filename="${ANDROID_APK_FILENAME}"`);
+  res.setHeader('Cache-Control', 'private, no-cache');
+  fs.createReadStream(filePath).pipe(res);
+});
+
 app.get('/api/downloads', (req: Request, res: Response) => {
   const getPackageInfo = (filename: string, name: string, description: string, tag: string) => {
     const filePath = path.join(DOWNLOADS_DIR, filename);
