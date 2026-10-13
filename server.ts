@@ -284,10 +284,7 @@ async function initializePostgres() {
       console.log('[Postgres] Migrated persisted state for screen groups and publications.');
     }
   } else {
-    await postgres.query(
-      'INSERT INTO app_state (id, data) VALUES (1, $1::jsonb)',
-      [JSON.stringify(db)]
-    );
+    await postgres.query('INSERT INTO app_state (id, data) VALUES (1, $1::jsonb)', [JSON.stringify(db)]);
     console.log('[Postgres] Created initial EkshitaScreen state.');
   }
   postgresReady = true;
