@@ -552,6 +552,18 @@ app.get('/api/deploy/commits', authMiddleware, adminMiddleware, async (_req: Req
   } catch { res.status(502).json({ error: 'Unable to read local Git history' }); }
 });
 
+app.post('/api/deploy', authMiddleware, adminMiddleware, async (req: Request, res: Response) => {
+  const hash = String(req.body?.hash || '').trim();
+  if (!/^[0-9a-f]{7,40}$/i.test(hash)) return res.status(400).json({ error: 'A valid commit hash is required' });
+  try {
+    await execFileAsync('git', ['fetch', 'origin', hash], { cwd: process.cwd(), windowsHide: true });
+    await execFileAsync('git', ['checkout', '--force', hash], { cwd: process.cwd(), windowsHide: true });
+    res.json({ ok: true, commit: hash, message: 'Commit checked out. Restart the server to load the deployed code.' });
+  } catch (error: any) {
+    res.status(500).json({ error: error?.stderr || error?.message || 'Deployment failed' });
+  }
+});
+
 // -------------------------------------------------------------
 // 2. DASHBOARD AUTHENTICATION
 // -------------------------------------------------------------

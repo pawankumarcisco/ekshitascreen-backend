@@ -23,11 +23,21 @@ export function DeployPage({ user }: { user: DashboardUser }) {
   const deploy = async (hash: string, restartOnly = false) => {
     if (busy || !hash) return;
     setBusy(true); setMenu(false); setStatus('Deploying');
-    const steps = restartOnly ? ['Stopping server…', 'Server restarted'] : [`Fetching origin…`, `Checking out ${hash}…`, 'npm ci', 'Building production bundle…', 'Build finished'];
-    for (const step of steps) { setLines(v => [...v, `$ ${step}`]); await new Promise(r => setTimeout(r, 500)); }
-    setLines(v => [...v, 'Health check passed · listening on :3000', 'Server running']);
-    if (!restartOnly) setLive(hash);
-    setStatus('Running'); setBusy(false); setPicking(false);
+    try {
+      if (restartOnly) {
+        setLines(v => [...v, '$ Restart requested']);
+      } else {
+        setLines(v => [...v, `$ Deploying ${hash}…`]);
+        const token = getAuthToken();
+        const response = await fetch('/api/deploy', { method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify({ hash }) });
+        const data = await response.json().catch(() => null);
+        if (!response.ok) throw new Error(data?.error || `Deployment failed (${response.status})`);
+        setLive(hash); setLines(v => [...v, data?.message || 'Commit deployed']);
+      }
+      setStatus('Running');
+    } catch (error) {
+      setStatus('Deployment failed'); setLines(v => [...v, `ERROR: ${error instanceof Error ? error.message : 'Deployment failed'}`]);
+    } finally { setBusy(false); setPicking(false); }
   };
   return <div className="max-w-6xl mx-auto p-6 space-y-6">
     <section className="bg-white border border-slate-200 rounded-2xl p-6 flex flex-wrap items-center justify-between gap-6">
