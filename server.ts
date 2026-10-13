@@ -556,7 +556,7 @@ app.post('/api/deploy', authMiddleware, adminMiddleware, async (req: Request, re
   const hash = String(req.body?.hash || '').trim();
   if (!/^[0-9a-f]{7,40}$/i.test(hash)) return res.status(400).json({ error: 'A valid commit hash is required' });
   try {
-    await execFileAsync('git', ['fetch', 'origin', hash], { cwd: process.cwd(), windowsHide: true });
+    await execFileAsync('git', ['fetch', '--all', '--prune'], { cwd: process.cwd(), windowsHide: true });
     await execFileAsync('git', ['checkout', '--force', hash], { cwd: process.cwd(), windowsHide: true });
     res.json({ ok: true, commit: hash, message: 'Commit checked out. Restart the server to load the deployed code.' });
   } catch (error: any) {
