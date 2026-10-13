@@ -11,15 +11,24 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { Pool } from 'pg';
 import ImageKit, { toFile } from '@imagekit/nodejs';
+import { relationalEnabled } from './src/db/relational-pool.js';
+import { createUser as createRelationalUser, deleteUser as deleteRelationalUser, findUserByEmail, findUserById, listUsers, updateUser as updateRelationalUser } from './src/db/user-repository.js';
+import { findDeviceByUid } from './src/db/device-repository.js';
 
 const PORT = Number(process.env.PORT || 3000);
+// Android sends a heartbeat every 30 seconds. Two consecutive missed heartbeats
+// are enough to mark the device offline; deployments can override this value.
+const DEVICE_OFFLINE_TIMEOUT_MS = Math.max(45_000, Number(process.env.DEVICE_OFFLINE_TIMEOUT_MS || 60_000));
 const JWT_SECRET = process.env.JWT_SECRET || 'screencast-local-jwt-secret-key-39281';
 const DEVICE_KEY_SECRET = process.env.DEVICE_KEY_SECRET || 'screencast-device-key-secret-91823';
-const DATABASE_URL = process.env.DATABASE_URL;
+const DATABASE_URL = process.env.NODE_ENV === 'production'
+  ? process.env.DATABASE_URL
+  : (process.env.LOCAL_DATABASE_URL || process.env.DATABASE_URL);
+const USE_LOCAL_STORAGE = process.env.USE_LOCAL_STORAGE === 'true';
 const IMAGEKIT_PRIVATE_KEY = process.env.IMAGEKIT_PRIVATE_KEY;
 const IMAGEKIT_URL_ENDPOINT = process.env.IMAGEKIT_URL_ENDPOINT?.replace(/\/$/, '');
 
-const postgres = DATABASE_URL ? new Pool({
+const postgres = DATABASE_URL && !USE_LOCAL_STORAGE ? new Pool({
   connectionString: DATABASE_URL,
   ssl: DATABASE_URL.includes('localhost') || DATABASE_URL.includes('127.0.0.1')
     ? undefined
@@ -40,8 +49,8 @@ const MEDIA_DIR = path.join(STORAGE_ROOT, 'media');
 const THUMBNAILS_DIR = path.join(STORAGE_ROOT, 'thumbnails');
 const DOWNLOADS_DIR = path.join(STORAGE_ROOT, 'downloads');
 const ANDROID_APK_FILENAME = process.env.ANDROID_APK_FILENAME || 'ekshitascreen-player.apk';
-const ANDROID_APK_VERSION_CODE = Number(process.env.ANDROID_APK_VERSION_CODE || 4);
-const ANDROID_APK_VERSION_NAME = process.env.ANDROID_APK_VERSION_NAME || '1.2.0';
+const ANDROID_APK_VERSION_CODE = Number(process.env.ANDROID_APK_VERSION_CODE || 5);
+const ANDROID_APK_VERSION_NAME = process.env.ANDROID_APK_VERSION_NAME || '1.2.1';
 const DATA_FILE = path.join(STORAGE_ROOT, 'screencast-db.json');
 
 if (!fs.existsSync(STORAGE_ROOT)) fs.mkdirSync(STORAGE_ROOT, { recursive: true });
@@ -214,13 +223,53 @@ async function initializePostgres() {
     return;
   }
 
-  await postgres.query(`
-    CREATE TABLE IF NOT EXISTS app_state (
-      id SMALLINT PRIMARY KEY CHECK (id = 1),
-      data JSONB NOT NULL,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
+  await postgres.query('BEGIN');
+  try {
+    await postgres.query(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    const migrations = [
+      {
+        version: 1,
+        name: 'create_app_state',
+        sql: `
+          CREATE TABLE IF NOT EXISTS app_state (
+            id SMALLINT PRIMARY KEY CHECK (id = 1),
+            data JSONB NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          )
+        `
+      },
+      {
+        version: 2,
+        name: 'relational_schema',
+        sql: fs.readFileSync(path.resolve(process.cwd(), 'db', 'migrations', '002_relational_schema.sql'), 'utf8')
+      }
+    ];
+
+    for (const migration of migrations) {
+      const applied = await postgres.query(
+        'SELECT 1 FROM schema_migrations WHERE version = $1',
+        [migration.version]
+      );
+      if (applied.rowCount) continue;
+      await postgres.query(migration.sql);
+      await postgres.query(
+        'INSERT INTO schema_migrations (version, name) VALUES ($1, $2)',
+        [migration.version, migration.name]
+      );
+      console.log(`[Postgres] Applied migration ${migration.version}: ${migration.name}`);
+    }
+    await postgres.query('COMMIT');
+  } catch (error) {
+    await postgres.query('ROLLBACK');
+    throw error;
+  }
 
   const result = await postgres.query<{ data: DBState }>('SELECT data FROM app_state WHERE id = 1');
   if (result.rows[0]?.data) {
@@ -432,7 +481,7 @@ function canAccessScreen(user: any, screen: any) {
   return user?.role === 'ADMIN' || screen?.userId === user?.id;
 }
 
-function deviceAuthMiddleware(req: any, res: Response, next: NextFunction) {
+async function deviceAuthMiddleware(req: any, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
   const deviceUid = req.headers['x-device-uid'] as string;
 
@@ -452,9 +501,9 @@ function deviceAuthMiddleware(req: any, res: Response, next: NextFunction) {
   }
 
   if (deviceUid) {
-    const dev = db.devices.find(d => d.deviceUid === deviceUid);
+    const dev = relationalEnabled ? await findDeviceByUid(deviceUid) : db.devices.find(d => d.deviceUid === deviceUid);
     if (dev) {
-      req.device = { deviceId: dev.id, deviceUid: dev.deviceUid };
+      req.device = { deviceId: dev.id, deviceUid: dev.device_uid || dev.deviceUid };
       return next();
     }
   }
@@ -489,12 +538,26 @@ app.get('/api/health', (req: Request, res: Response) => {
   });
 });
 
+app.get('/api/deploy/commits', authMiddleware, adminMiddleware, async (_req: Request, res: Response) => {
+  const requested = String(_req.query.repository || process.env.GITHUB_REPOSITORY || 'pawankumarcisco/ekshitascreen-backend');
+  const repository = requested.replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '').replace(/^\/+|\/+$/g, '');
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) return res.status(400).json({ error: 'Repository must be in owner/name format' });
+  try {
+    const response = await fetch(`https://api.github.com/repos/${repository}/commits?per_page=12`, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'EkshitaScreen' } });
+    if (!response.ok) return res.status(response.status === 404 ? 404 : 502).json({ error: 'Unable to load GitHub commits' });
+    const commits = await response.json() as any[];
+    res.json({ repository, url: `https://github.com/${repository}`, commits: commits.map(commit => ({ hash: String(commit.sha).slice(0, 7), message: String(commit.commit?.message || '').split('\n')[0], author: commit.author?.login || commit.commit?.author?.name || 'Unknown', date: commit.commit?.author?.date || null, url: commit.html_url })) });
+  } catch { res.status(502).json({ error: 'Unable to reach GitHub' }); }
+});
+
 // -------------------------------------------------------------
 // 2. DASHBOARD AUTHENTICATION
 // -------------------------------------------------------------
-app.post('/api/auth/login', (req: Request, res: Response) => {
+app.post('/api/auth/login', async (req: Request, res: Response) => {
   const { email, password } = req.body;
-  const user = db.users.find(u => u.email.toLowerCase() === (email || '').toLowerCase() && u.isActive);
+  const user = relationalEnabled
+    ? await findUserByEmail(email || '')
+    : db.users.find(u => u.email.toLowerCase() === (email || '').toLowerCase() && u.isActive);
   if (!user || !bcrypt.compareSync(password, user.passwordHash)) {
     return res.status(401).json({ error: 'Invalid email or password' });
   }
@@ -520,8 +583,8 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
   });
 });
 
-app.get('/api/auth/me', authMiddleware, (req: any, res: Response) => {
-  const user = db.users.find(u => u.id === req.user.id);
+app.get('/api/auth/me', authMiddleware, async (req: any, res: Response) => {
+  const user = relationalEnabled ? await findUserById(req.user.id) : db.users.find(u => u.id === req.user.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
   res.json({
     id: user.id,
@@ -534,38 +597,64 @@ app.get('/api/auth/me', authMiddleware, (req: any, res: Response) => {
 });
 
 // USER MANAGEMENT (ADMIN ONLY)
-app.get('/api/users', authMiddleware, adminMiddleware, (_req: Request, res: Response) => {
-  res.json(db.users.map(({ passwordHash, ...user }) => user));
+app.get('/api/users', authMiddleware, adminMiddleware, async (_req: Request, res: Response) => {
+  const users = relationalEnabled ? await listUsers() : db.users;
+  res.json(users.map(({ passwordHash, ...user }) => user));
 });
 
-app.post('/api/users', authMiddleware, adminMiddleware, (req: any, res: Response) => {
+app.post('/api/users', authMiddleware, adminMiddleware, async (req: any, res: Response) => {
   const { name, email, password, role = 'OPERATOR', isActive = true } = req.body;
   if (!name?.trim() || !email?.trim() || !password || password.length < 6) return res.status(400).json({ error: 'Name, email, and a password of at least 6 characters are required' });
-  if (db.users.some(user => user.email.toLowerCase() === email.trim().toLowerCase())) return res.status(409).json({ error: 'A user with this email already exists' });
+  if (!relationalEnabled && db.users.some(user => user.email.toLowerCase() === email.trim().toLowerCase())) return res.status(409).json({ error: 'A user with this email already exists' });
   const now = new Date().toISOString();
   const user = { id: 'user-' + crypto.randomUUID(), name: name.trim(), email: email.trim().toLowerCase(), passwordHash: bcrypt.hashSync(password, 10), role: role === 'VIEWER' ? 'VIEWER' : 'OPERATOR', isActive: Boolean(isActive), createdAt: now, updatedAt: now };
+  if (relationalEnabled) {
+    try {
+      const safeUser = await createRelationalUser(user, { id: 'audit-' + crypto.randomUUID(), actorId: req.user.id, details: { userId: user.id } });
+      return res.status(201).json(safeUser);
+    } catch (error: any) {
+      if (error?.code === '23505') return res.status(409).json({ error: 'A user with this email already exists' });
+      return res.status(500).json({ error: 'Unable to create user' });
+    }
+  }
   db.users.push(user); saveDB(db);
   const { passwordHash, ...safeUser } = user; res.status(201).json(safeUser);
 });
 
-app.patch('/api/users/:id', authMiddleware, adminMiddleware, (req: any, res: Response) => {
-  const user = db.users.find(item => item.id === req.params.id);
+app.patch('/api/users/:id', authMiddleware, adminMiddleware, async (req: any, res: Response) => {
+  const user = relationalEnabled ? await findUserById(req.params.id) : db.users.find(item => item.id === req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const { name, email, password, role, isActive } = req.body;
-  if (email && db.users.some(item => item.id !== user.id && item.email.toLowerCase() === email.trim().toLowerCase())) return res.status(409).json({ error: 'A user with this email already exists' });
+  if (!relationalEnabled && email && db.users.some(item => item.id !== user.id && item.email.toLowerCase() === email.trim().toLowerCase())) return res.status(409).json({ error: 'A user with this email already exists' });
   if (name !== undefined) user.name = name.trim();
   if (email !== undefined) user.email = email.trim().toLowerCase();
   if (password) { if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' }); user.passwordHash = bcrypt.hashSync(password, 10); }
   if (role !== undefined && user.id !== req.user.id) user.role = role === 'VIEWER' ? 'VIEWER' : 'OPERATOR';
   if (isActive !== undefined && user.id !== req.user.id) user.isActive = Boolean(isActive);
+  if (relationalEnabled) {
+    try {
+      const safeUser = await updateRelationalUser(user.id, { name: user.name, email: user.email, passwordHash: password ? user.passwordHash : undefined, role: user.role, isActive: user.isActive, updatedAt: new Date().toISOString() }, { id: 'audit-' + crypto.randomUUID(), actorId: req.user.id, details: { userId: user.id } });
+      if (!safeUser) return res.status(404).json({ error: 'User not found' });
+      return res.json(safeUser);
+    } catch (error: any) {
+      if (error?.code === '23505') return res.status(409).json({ error: 'A user with this email already exists' });
+      return res.status(500).json({ error: 'Unable to update user' });
+    }
+  }
   user.updatedAt = new Date().toISOString(); saveDB(db);
   const { passwordHash, ...safeUser } = user; res.json(safeUser);
 });
 
-app.delete('/api/users/:id', authMiddleware, adminMiddleware, (req: any, res: Response) => {
+app.delete('/api/users/:id', authMiddleware, adminMiddleware, async (req: any, res: Response) => {
   if (req.params.id === req.user.id) return res.status(400).json({ error: 'You cannot delete your own account' });
-  const user = db.users.find(item => item.id === req.params.id);
+  const user = relationalEnabled ? await findUserById(req.params.id) : db.users.find(item => item.id === req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
+  if (relationalEnabled) {
+    const result = await deleteRelationalUser(user.id, { id: 'audit-' + crypto.randomUUID(), actorId: req.user.id, details: { userId: user.id } });
+    if (result.referenced) return res.status(409).json({ error: 'Reassign or remove this user’s screens and media before deleting the account' });
+    if (!result.deleted) return res.status(404).json({ error: 'User not found' });
+    return res.json({ message: 'User deleted' });
+  }
   if (db.screens.some(screen => screen.userId === user.id) || db.mediaAssets.some(asset => asset.userId === user.id)) return res.status(409).json({ error: 'Reassign or remove this user’s screens and media before deleting the account' });
   db.users = db.users.filter(item => item.id !== user.id); saveDB(db); res.json({ message: 'User deleted' });
 });
@@ -706,13 +795,16 @@ app.get('/api/device/activation/status', (req: Request, res: Response) => {
 // -------------------------------------------------------------
 // 4. SCREEN REGISTRATION (from Dashboard)
 // -------------------------------------------------------------
-app.post('/api/screens/register', authMiddleware, adminMiddleware, (req: any, res: Response) => {
+app.post('/api/screens/register', authMiddleware, adminMiddleware, async (req: any, res: Response) => {
   const { code, name, location, description, config, userId } = req.body;
 
   if (!code || !name || !userId) {
     return res.status(400).json({ error: 'Activation code, screen name, and assigned user are required' });
   }
-  const assignedUser = db.users.find(user => user.id === userId && user.isActive && user.role !== 'ADMIN');
+  const assignedUser = relationalEnabled
+    ? await findUserById(userId)
+    : db.users.find(user => user.id === userId && user.isActive && user.role !== 'ADMIN');
+  if (relationalEnabled && (!assignedUser || !assignedUser.isActive || assignedUser.role === 'ADMIN')) return res.status(400).json({ error: 'Select an active non-admin user' });
   if (!assignedUser) return res.status(400).json({ error: 'Select an active non-admin user' });
 
   const cleanCode = code.trim().toUpperCase();
@@ -1066,7 +1158,7 @@ app.get('/api/screen-groups', authMiddleware, (req: any, res: Response) => {
     const members = db.screens.filter(s => memberIds.includes(s.id));
     const online = members.filter(s => {
       const d = db.devices.find(device => device.id === s.deviceId);
-      return d?.lastSeenAt && now - new Date(d.lastSeenAt).getTime() <= 90000;
+      return d?.lastSeenAt && now - new Date(d.lastSeenAt).getTime() <= DEVICE_OFFLINE_TIMEOUT_MS;
     }).length;
     return { ...group, screenIds: memberIds, totalScreens: members.length, onlineScreens: online, offlineScreens: members.length - online };
   }));
@@ -1279,7 +1371,7 @@ app.post('/api/publications/:jobId/targets/:targetId/rollback', authMiddleware, 
 // -------------------------------------------------------------
 app.get('/api/screens', authMiddleware, (req: any, res: Response) => {
   const now = Date.now();
-  const OFFLINE_THRESHOLD_MS = 90 * 1000; // 90 seconds
+  const OFFLINE_THRESHOLD_MS = DEVICE_OFFLINE_TIMEOUT_MS;
 
   const visibleScreens = req.user.role === 'ADMIN' ? db.screens : db.screens.filter(screen => screen.userId === req.user.id);
   const enrichedScreens = visibleScreens.map(screen => {
@@ -1358,7 +1450,7 @@ app.get('/api/screens/:id', authMiddleware, (req: any, res: Response) => {
 
   const now = Date.now();
   const lastSeenTime = device?.lastSeenAt ? new Date(device.lastSeenAt).getTime() : 0;
-  const isOnline = Boolean(device && (now - lastSeenTime <= 90 * 1000));
+  const isOnline = Boolean(device && (now - lastSeenTime <= DEVICE_OFFLINE_TIMEOUT_MS));
 
   res.json({
     ...screen,

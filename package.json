@@ -8,6 +8,8 @@
   },
   "scripts": {
     "dev": "tsx server.ts",
+    "db:import": "tsx scripts/import-legacy-state.ts",
+    "db:verify": "tsx scripts/verify-relational-import.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/server.js",
     "start": "node dist/server.js",
     "clean": "rm -rf dist server.js",

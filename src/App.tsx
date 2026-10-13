@@ -11,6 +11,7 @@ import { SystemNetwork } from './components/SystemNetwork';
 import { RegisterScreenModal } from './components/RegisterScreenModal';
 import { LoginPage } from './components/LoginPage';
 import { UsersPage } from './components/UsersPage';
+import { DeployPage } from './components/DeployPage';
 import { api, clearAuthToken, getAuthToken } from './services/api';
 import { Screen, MediaAsset, DashboardUser } from './types';
 import {
@@ -20,7 +21,7 @@ import {
 
 export function App() {
   const [path, setPath] = useState(window.location.pathname);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'screens' | 'playlists' | 'media' | 'settings' | 'network' | 'users'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'screens' | 'playlists' | 'media' | 'settings' | 'network' | 'users' | 'deploy'>('dashboard');
   const [selectedScreenId, setSelectedScreenId] = useState<string | null>(null);
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
   const [isRegisterOpen, setIsRegisterOpen] = useState(false);
@@ -298,6 +299,7 @@ export function App() {
         {/* SYSTEM & NETWORK TAB */}
         {activeTab === 'network' && user.role === 'ADMIN' && <SystemNetwork />}
         {activeTab === 'users' && user.role === 'ADMIN' && <UsersPage />}
+        {activeTab === 'deploy' && user.role === 'ADMIN' && <DeployPage user={user} />}
 
       </main>
 
