@@ -546,7 +546,8 @@ app.get('/api/deploy/commits', authMiddleware, adminMiddleware, async (_req: Req
   const repository = requested.replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '').replace(/^\/+|\/+$/g, '');
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) return res.status(400).json({ error: 'Repository must be in owner/name format' });
   try {
-    const { stdout } = await execFileAsync('git', ['log', '-n', '50', '--pretty=format:%H%x1f%an%x1f%aI%x1f%s'], { cwd: process.cwd(), windowsHide: true });
+    await execFileAsync('git', ['fetch', '--all', '--prune'], { cwd: process.cwd(), windowsHide: true });
+    const { stdout } = await execFileAsync('git', ['log', 'origin/main', '-n', '50', '--pretty=format:%H%x1f%an%x1f%aI%x1f%s'], { cwd: process.cwd(), windowsHide: true });
     const commits = stdout.split(/\r?\n/).filter(Boolean).map(line => { const [fullHash, author, date, ...message] = line.split('\x1f'); return { hash: fullHash.slice(0, 7), message: message.join('\x1f'), author, date, url: `https://github.com/${repository}/commit/${fullHash}` }; });
     res.json({ repository, url: `https://github.com/${repository}`, commits });
   } catch { res.status(502).json({ error: 'Unable to read local Git history' }); }
