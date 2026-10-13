@@ -74,19 +74,9 @@ export const Navbar: React.FC<NavbarProps> = ({
           >
             Media Library
           </button>
-          {user.role === 'ADMIN' && <button
-            onClick={() => setActiveTab('network')}
-            className={`transition-colors hover:text-slate-900 pb-0.5 border-b-2 ${
-              activeTab === 'network'
-                ? 'border-sky-600 text-slate-900 font-semibold'
-                : 'border-transparent'
-            }`}
-          >
-            Network & Logs
-          </button>}
           {user.role === 'ADMIN' && <button onClick={() => setActiveTab('users')} className={`transition-colors hover:text-slate-900 pb-0.5 border-b-2 ${activeTab === 'users' ? 'border-sky-600 text-slate-900 font-semibold' : 'border-transparent'}`}>Users</button>}
           {user.role === 'ADMIN' && <button onClick={() => setActiveTab('settings')} className={`transition-colors hover:text-slate-900 pb-0.5 border-b-2 ${activeTab === 'settings' ? 'border-sky-600 text-slate-900 font-semibold' : 'border-transparent'}`}>Settings</button>}
-          {user.role === 'ADMIN' && <button onClick={() => setActiveTab('deploy')} className={`transition-colors hover:text-slate-900 pb-0.5 border-b-2 ${activeTab === 'deploy' ? 'border-sky-600 text-slate-900 font-semibold' : 'border-transparent'}`}>Deploy</button>}
+          {user.role === 'ADMIN' && <button onClick={() => setActiveTab('deploy')} aria-label="Open deployment page" className={`transition-colors hover:text-slate-900 pb-0.5 border-b-2 ${activeTab === 'deploy' ? 'border-sky-600 text-slate-900 font-semibold' : 'border-transparent'}`}>Deploy</button>}
         </nav>
 
         {/* Zone 3: Actions & Profile */}

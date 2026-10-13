@@ -1,6 +1,8 @@
 import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
 import http from 'http';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
@@ -14,6 +16,7 @@ import ImageKit, { toFile } from '@imagekit/nodejs';
 import { relationalEnabled } from './src/db/relational-pool.js';
 import { createUser as createRelationalUser, deleteUser as deleteRelationalUser, findUserByEmail, findUserById, listUsers, updateUser as updateRelationalUser } from './src/db/user-repository.js';
 import { findDeviceByUid } from './src/db/device-repository.js';
+const execFileAsync = promisify(execFile);
 
 const PORT = Number(process.env.PORT || 3000);
 // Android sends a heartbeat every 30 seconds. Two consecutive missed heartbeats
@@ -543,11 +546,10 @@ app.get('/api/deploy/commits', authMiddleware, adminMiddleware, async (_req: Req
   const repository = requested.replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '').replace(/^\/+|\/+$/g, '');
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) return res.status(400).json({ error: 'Repository must be in owner/name format' });
   try {
-    const response = await fetch(`https://api.github.com/repos/${repository}/commits?per_page=12`, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'EkshitaScreen' } });
-    if (!response.ok) return res.status(response.status === 404 ? 404 : 502).json({ error: 'Unable to load GitHub commits' });
-    const commits = await response.json() as any[];
-    res.json({ repository, url: `https://github.com/${repository}`, commits: commits.map(commit => ({ hash: String(commit.sha).slice(0, 7), message: String(commit.commit?.message || '').split('\n')[0], author: commit.author?.login || commit.commit?.author?.name || 'Unknown', date: commit.commit?.author?.date || null, url: commit.html_url })) });
-  } catch { res.status(502).json({ error: 'Unable to reach GitHub' }); }
+    const { stdout } = await execFileAsync('git', ['log', '-n', '50', '--pretty=format:%H%x1f%an%x1f%aI%x1f%s'], { cwd: process.cwd(), windowsHide: true });
+    const commits = stdout.split(/\r?\n/).filter(Boolean).map(line => { const [fullHash, author, date, ...message] = line.split('\x1f'); return { hash: fullHash.slice(0, 7), message: message.join('\x1f'), author, date, url: `https://github.com/${repository}/commit/${fullHash}` }; });
+    res.json({ repository, url: `https://github.com/${repository}`, commits });
+  } catch { res.status(502).json({ error: 'Unable to read local Git history' }); }
 });
 
 // -------------------------------------------------------------
